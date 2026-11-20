@@ -16,6 +16,7 @@ WhaleLife 插件。把「一串工具调用」存成一条可复用的技能，�
 | `space_run({ id, params, confirmSideEffects })` | 真跑一遍，返回逐步回执 |
 | `space_trace({ runId, recent })` | 按 `runId` 取回一次运行的完整步骤（内存留一小时） |
 | `space_organize({ force })` | 从最近的工具调用记录里找反复出现的工具链，整理成技能 |
+| `space_ports({ tool })` | 从记录下来的返回值形状反推每个工具的输出端口和类型，供拼技能时查「上一步哪个字段能接下去」。是观测不是声明：`trusted` 只在同一形状出现过三次以上时为真 |
 
 页面：
 
@@ -181,7 +182,7 @@ $("space-nav").hidden = !page;
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `allowSave` | 开 | 关掉后 `space_skill_save` 和导入一律 `blocked` |
-| `allowUse` | 开 | 允许在对话里使用已保存的技能。**当前版本尚无独立的技能执行器，这一项只是状态开关** |
+| `allowUse` | 开 | 允许在对话里使用已保存的技能。关掉后 `space_run` 一律 `blocked` |
 | `autoOrganize` | 开 | 自动整理的总开关；关掉后 hints 不出现，但调用统计照记 |
 | `spaceUrl` | `http://127.0.0.1:9281/` | 「打开思维空间」按钮指向的画布地址，只认 http/https，≤300 字 |
 | `maxSteps` | 20 | 单条技能最多步数，1–20，只影响新保存 |
@@ -192,6 +193,8 @@ $("space-nav").hidden = !page;
 | `learnOnRequest` | 开 | 让助手知道「用户说一句话时就该去整理」 |
 | `triggerPhrase` | `XXX，你学会这个技能了吗？` | 那句话本身，`XXX` 换成人格名 |
 | `stepTimeoutSeconds` | 60 | 单步超时，1–600 |
+| `canvasScript` | 空 | 画布脚本的完整路径。**出厂为空**，不写死任何人的路径；留空时点「启动画布」会提示去设置页填 |
+| `observeHands` | 关 | 是否记录 `hands_*` 类工具的返回值形状。开着也只记键名和类型（如 `{ok:b,result:s}`），不记路径、不记正文 |
 
 **`learnOnRequest` 和 `triggerPhrase` 只是把状态带给模型，插件本身不监听对话。** 听不听那句话，是模型负责的事。
 
@@ -200,13 +203,15 @@ $("space-nav").hidden = !page;
 ## 八、数据文件
 
 ```
-data/skills.json     技能库（唯一真源）
-data/settings.json   设置
-data/stats.json      每条技能的运行次数、失败原因分桶、候选命中统计
-data/calls.json      最近的工具调用记录（自动整理用，默认 800 条上限）
+data/skills.json          技能库（唯一真源）
+data/settings.json        设置；出厂值见 data/settings.example.json
+data/stats.json           每条技能的运行次数、失败原因分桶、候选命中统计
+data/calls.json           最近的工具调用记录（自动整理 + 端口推断用，默认 800 条上限）
+data/failures.json        最近的失败原因（最多 200 条，排查用）
+data/param-defaults.json  可选：给没写默认值的必填参数补一份，只影响自动整理学出来的技能
 ```
 
-四个文件都是纯 JSON，可以直接看、直接备份。
+都是纯 JSON，可以直接看、直接备份。除 `settings.example.json` 外，仓库里不带这些文件——克隆下来是干净的技能库，没有别人的调试记录。
 
 ---
 
