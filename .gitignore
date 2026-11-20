@@ -1,0 +1,11 @@
+node_modules/
+data/config.json
+data/skills.json
+data/calls.json
+data/stats.json
+data/settings.json
+data/backup/
+*.bak-*
+*.bak
+*.log
+tmp/

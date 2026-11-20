@@ -1,0 +1,6 @@
+id: thinking-space
+name: 思维空间
+description: 可由勘读写的服务端技能库
+version: 0.1.0
+apiVersion: 1.0.0
+depends: [web, tools]

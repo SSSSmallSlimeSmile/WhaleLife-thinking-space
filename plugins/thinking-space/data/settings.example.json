@@ -1,0 +1,13 @@
+{
+  "allowUse": true,
+  "autoOrganize": true,
+  "organizeIntervalMinutes": 120,
+  "organizeMinRepeat": 3,
+  "organizeCaseMax": 3,
+  "allowRiskyChains": false,
+  "learnOnRequest": false,
+  "learnTrigger": "XXX，学会这个技能了吗？",
+  "stepTimeoutSeconds": 60,
+  "canvasScriptPath": "",
+  "canvasPort": 9281
+}
