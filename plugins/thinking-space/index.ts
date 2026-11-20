@@ -3,7 +3,7 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import type { Context, ToolContract } from "whalelife";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -14,6 +14,8 @@ const pagePath = "/plugins/thinking-space/";
 const defaultSpaceUrl = "http://127.0.0.1:9281/";
 const defaultCanvasScript = "";  // 不写死任何本机路径；留空时由设置页填。
 const canvasPort = 9281;
+/** 本插件亲手启出来的画布进程。宿主退出时按这个收，别人的不动。 */
+let canvasHostPid: number | null = null;
 const defaultTriggerPhrase = "XXX，你学会了吗？";
 const idPattern = /^[a-zA-Z0-9_-]{1,64}$/;
 const parameterPattern = /^[\p{L}_][\p{L}\p{N}_-]{0,63}$/u;
@@ -1737,6 +1739,7 @@ export function apply(ctx: Context) {
     try {
       const child = spawn(process.execPath, [script], { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
       child.unref();
+      canvasHostPid = child.pid ?? null;
     } catch (error) {
       canvasError = `拉不起来：${error instanceof Error ? error.message : ""}`;
       return canvasError;
@@ -1754,9 +1757,19 @@ export function apply(ctx: Context) {
     if (!pid) { canvasError = undefined; return "本来就没在跑。"; }
     await ps(`taskkill /PID ${pid} /F`);
     if (await canvasPid()) { canvasError = `停不下来（PID ${pid}）。`; return canvasError; }
+    canvasHostPid = null;
     canvasError = undefined;
     return `画布已停（PID ${pid}）。`;
   }
+  // 宿主关闭时把画布一起收掉。画布是 detached 起的，不主动收会一直挂着占显存。
+  // 这里用同步 taskkill：宿主 close() 只有超时兜底，等异步 PowerShell 轮询来不及。
+  ctx.on("whalelife/shutdown", () => {
+    const pid = canvasHostPid;
+    if (!pid) return;
+    try { spawnSync("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true, stdio: "ignore" }); }
+    catch { /* 已经退了就算了 */ }
+    canvasHostPid = null;
+  });
   const settingsStats = async () => {
     const [settings, skills] = await Promise.all([readSettings(), list()]);
     return renderSettings(settings, {

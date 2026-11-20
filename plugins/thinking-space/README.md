@@ -231,6 +231,10 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 **七、`comfy_generate` 这类常驻 GPU 的工具，第二次出图可能因为显存没释放被自己的阈值拦住**，跟技能库无关。
 
+**八、画布的启停只在 Windows 验证过。** 查端口、结束进程走的是 `taskkill` 和 PowerShell，Linux / macOS 上「启动画布 / 停止」会失败；技能库、执行器、页面、自动整理不依赖平台。
+
+**九、宿主关闭时只收自己启起来的那一个。** 插件会记住亲手 spawn 出来的画布 PID，在 `whalelife/shutdown` 里同步 kill 掉，避免 detached 进程一直挂着占显存。你在外面手动起的画布不归它管，得自己停。
+
 ---
 
 ## 十、许可
