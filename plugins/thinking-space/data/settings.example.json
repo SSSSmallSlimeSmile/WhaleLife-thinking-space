@@ -1,13 +1,17 @@
 {
+  "_说明": "这是出厂默认值，复制成 data/settings.json 后改。本机实际值不用提交。",
   "allowUse": true,
+  "allowSave": true,
+  "maxSteps": 20,
   "autoOrganize": true,
-  "organizeIntervalMinutes": 120,
-  "organizeMinRepeat": 3,
-  "organizeCaseMax": 3,
-  "allowRiskyChains": false,
-  "learnOnRequest": false,
-  "learnTrigger": "XXX，学会这个技能了吗？",
+  "spaceUrl": "http://127.0.0.1:9281/",
   "stepTimeoutSeconds": 60,
-  "canvasScriptPath": "",
-  "canvasPort": 9281
+  "organizeThreshold": 3,
+  "organizeWindowMinutes": 120,
+  "autoSaveOrganized": true,
+  "observeHands": false,
+  "allowRiskyChains": false,
+  "learnOnRequest": true,
+  "triggerPhrase": "XXX，学会这个技能了吗？",
+  "canvasScript": ""
 }

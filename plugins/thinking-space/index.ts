@@ -9,9 +9,10 @@ import { dirname } from "node:path";
 
 const storeFile = "skills.json";
 const settingsFile = "settings.json";
+const paramDefaultsFile = "param-defaults.json";
 const pagePath = "/plugins/thinking-space/";
 const defaultSpaceUrl = "http://127.0.0.1:9281/";
-const defaultCanvasScript = "";
+const defaultCanvasScript = "";  // 不写死任何本机路径；留空时由设置页填。
 const canvasPort = 9281;
 const defaultTriggerPhrase = "XXX，你学会了吗？";
 const idPattern = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -25,7 +26,7 @@ type Parameter = { name: string; type: typeof types[number]; required: boolean; 
 type Step = { id: string; tool: string; plugin: string; params: JsonObject; next: string | null };
 type Skill = { schemaVersion: 1; id: string; name: string; description: string; kind: "single" | "composite"; params: Parameter[]; steps: Step[]; danger: Danger; revision?: number };
 type Store = { schemaVersion: 1; skills: Skill[] };
-type Settings = { allowRiskyChains: boolean; allowSave: boolean; allowUse: boolean; maxSteps: number; autoOrganize: boolean; spaceUrl: string; stepTimeoutSeconds: number; organizeThreshold: number; organizeWindowMinutes: number; autoSaveOrganized: boolean; learnOnRequest: boolean; triggerPhrase: string; canvasScript: string };
+type Settings = { observeHands: boolean; allowRiskyChains: boolean; allowSave: boolean; allowUse: boolean; maxSteps: number; autoOrganize: boolean; spaceUrl: string; stepTimeoutSeconds: number; organizeThreshold: number; organizeWindowMinutes: number; autoSaveOrganized: boolean; learnOnRequest: boolean; triggerPhrase: string; canvasScript: string };
 
 function withTimeout<T>(work: Promise<T>, seconds: number, tool: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -49,6 +50,19 @@ function unresolved(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(unresolved);
   if (record(value)) return Object.values(value).some(unresolved);
   return false;
+}
+// 元信息键（$rank 等）不参与「下一步是否已就绪」的判定：可选参数不传时它们会留着占位符
+function withoutMeta(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutMeta);
+  if (record(value)) {
+    const out: JsonObject = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key.startsWith("$") && key !== "$try") continue;
+      out[key] = withoutMeta(item);
+    }
+    return out;
+  }
+  return value;
 }
 function record(value: unknown): value is JsonObject {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -167,7 +181,8 @@ type RunStatus = "ok" | "empty" | "failed" | "uncertain" | "blocked" | "skipped"
 type StepResult = { id: string; tool: string; plugin: string; status: RunStatus; elapsedMs: number; input: unknown; output: unknown; error?: string; attempts?: { value: unknown; status: string; elapsedMs: number; error?: string }[]; tries?: { key: string; hit: number; total: number }[] };
 type CutNote = { key: string; kept: unknown; droppedCount: number };
 type TrimNote = { from: number; to: number; dropped: { id: string; tool: string; why: string }[]; revision: number; cut?: CutNote[] };
-type RunResult = { status: RunStatus; runId: string; skill: string; steps: StepResult[]; error?: string; trimmed?: TrimNote };
+type RelevanceNote = { status: "matched" | "weak" | "unrelated" | "unassessed"; hits: number; terms: number; ratio: number; basis: string };
+type RunResult = { status: RunStatus; runId: string; skill: string; steps: StepResult[]; error?: string; trimmed?: TrimNote; relevance?: RelevanceNote };
 
 const sideEffectTools = new Set(["hands_write", "hands_run", "qq_send_image", "qq_send_meme", "mouth_say", "speak"]);
 
@@ -213,7 +228,7 @@ function fill(value: unknown, params: JsonObject, previous: Map<string, unknown>
 }
 
 // 把参数里的 {"$try":[...]} 展开成若干份候选输入，按顺序试，第一个成功即采用。
-function expandTry(input: JsonObject): JsonObject[] {
+function expandTry(input: JsonObject, rank?: number): JsonObject[] {
   const keys: { key: string; list: unknown[] }[] = [];
   for (const [key, value] of Object.entries(input)) {
     if (record(value) && Array.isArray((value as any).$try)) keys.push({ key, list: (value as any).$try });
@@ -221,7 +236,9 @@ function expandTry(input: JsonObject): JsonObject[] {
   if (!keys.length) return [input];
   const len = Math.max(...keys.map(item => item.list.length));
   const out: JsonObject[] = [];
+  const seen = new Set<string>();
   for (let i = 0; i < len; i++) {
+    if (rank !== undefined && i !== rank - 1) continue;
     const copy: JsonObject = { ...input };
     let usable = true;
     for (const item of keys) {
@@ -230,9 +247,71 @@ function expandTry(input: JsonObject): JsonObject[] {
       if (pick === undefined || pick === null || pick === "") { usable = false; break; }
       copy[item.key] = pick;
     }
-    if (usable) out.push(copy);
+    delete (copy as any).$rank;
+    if (!usable) continue;
+    // 同一次任务里同一个候选只读一次：链接重复的候选直接跳过
+    const fingerprint = JSON.stringify(keys.map(item => copy[item.key]));
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    out.push(copy);
   }
   return out;
+}
+
+// 排名直取：步骤参数写成 { "$try": [...], "$rank": "${resultRank}" }
+// 给定排名就只试那一条；越界、不是整数、缺参数各有明确原因。
+function resolveRank(input: JsonObject): { rank?: number; total?: number; error?: string } {
+  let rank: number | undefined;
+  let total: number | undefined;
+  for (const value of Object.values(input)) {
+    if (!record(value) || !Object.hasOwn(value, "$rank")) continue;
+    const raw = (value as any).$rank;
+    if (typeof raw === "string" && raw.includes("${")) continue;
+    if (raw === null || raw === undefined || raw === "") continue;
+    const num = typeof raw === "number" ? raw : Number(raw);
+    if (!Number.isInteger(num)) return { error: "参数 resultRank 必须是整数，从 1 开始。" };
+    const list = Array.isArray((value as any).$try) ? (value as any).$try : [];
+    if (num < 1) return { error: "参数 resultRank 从 1 开始，不能小于 1。" };
+    if (num > list.length) return { error: "排名越界：resultRank=" + num + "，这次只有 " + list.length + " 条候选。" };
+    rank = num;
+    total = num > 0 ? list.length : total;
+  }
+  return { rank, total };
+}
+
+// 字面相关性：把查询拆成词，看正文里命中几个。不判断语义，只报"出现了多少"。
+// 目的是把"读到了"和"读到的东西和问题有关"分开，不是给内容打分。
+function queryTerms(query: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (term: string) => {
+    const clean = term.trim().toLowerCase();
+    if (clean.length < 2 || seen.has(clean)) return;
+    seen.add(clean);
+    out.push(clean);
+  };
+  // 连写的中日韩文字：取整段（短）与相邻二字（长），不要单字，单字命中没意义
+  for (const run of query.match(/[\u3400-\u9fff\uf900-\ufaff]{2,}/g) ?? []) {
+    if (run.length <= 4) push(run);
+    for (let i = 0; i + 2 <= run.length; i += 2) push(run.slice(i, i + 2));
+  }
+  for (const word of query.match(/[A-Za-z0-9][A-Za-z0-9._-]+/g) ?? []) push(word);
+  return out.slice(0, 12);
+}
+
+function checkRelevance(query: string | undefined, output: unknown): RelevanceNote | null {
+  if (!query || query.trim().length < 2 || output === null || output === undefined) return null;
+  const terms = queryTerms(query);
+  if (!terms.length) return null;
+  const content = textLeaves(output).join("\n").toLowerCase();
+  if (!content) return null;
+  const hits = terms.filter(term => content.includes(term)).length;
+  const ratio = hits / terms.length;
+  const status: RelevanceNote["status"] = ratio >= 0.5 ? "matched" : ratio > 0 ? "weak" : "unrelated";
+  return {
+    status, hits, terms: terms.length, ratio: Number(ratio.toFixed(2)),
+    basis: "按字面词重合判断，不是语义判断；查询词 " + hits + "/" + terms.length + " 出现在读到的正文里。",
+  };
 }
 
 function namesOf(param: Parameter): string[] {
@@ -300,14 +379,14 @@ function html(title: string, body: string) {
   return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)}</title>
 <link rel="stylesheet" href="/ui/styles.css">
 <style>
-.space-toolbar{display:flex;justify-content:flex-start;margin-bottom:20px}
+.space-toolbar{display:flex;justify-content:flex-start;gap:10px;margin-bottom:16px}
 .space-secondary{display:inline-flex;align-items:center;padding:10px 18px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:inherit;text-decoration:none;font-size:14px;font-weight:600}
 .space-panel{background:var(--surface)}
 .space-panel form>p{margin-bottom:24px}
 .space-panel form{display:block}
-.space-wrap{max-width:none;margin:0;padding:26px 24px 72px}
-.space-panel{border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:0 0 16px;background:var(--surface)}
-.space-panel>h2{margin:0 0 14px;padding-bottom:12px;font-size:15px;font-weight:700;letter-spacing:.2px;border-bottom:1px solid var(--line)}
+.space-wrap{max-width:1080px;margin:0 auto;padding:20px 24px 72px}
+.space-panel{border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:0 0 14px;background:var(--surface)}
+.space-panel>h2{margin:0 0 12px;padding-bottom:10px;font-size:15px;font-weight:700;letter-spacing:.2px;border-bottom:1px solid var(--line)}
 .space-panel>p{margin:0 0 10px;line-height:1.65}
 .space-panel>p:last-child{margin-bottom:0}
 .space-notice{margin:0 0 16px;padding:10px 14px;border-radius:10px;font-size:14px;font-weight:600;line-height:1.55}
@@ -339,9 +418,11 @@ function html(title: string, body: string) {
 .space-save:hover{background:#3d2f9c}
 .space-card{border:1px solid rgba(127,127,127,.2);border-radius:12px;padding:14px 16px;margin:0 0 12px}
 .space-card:last-child{margin-bottom:0}
+    .space-card-ops{margin:10px 0 4px}
+    .space-card-ops .space-secondary{padding:6px 14px;font-size:13px}
 .space-card h3{margin:0 0 6px;font-size:15px;font-weight:650}
 .space-card p{margin:0 0 8px;line-height:1.6}
-.space-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:500;white-space:nowrap;background:#f3f4f7;color:#7d8393;margin:0 6px 0 0;line-height:1.5}
+.space-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:500;white-space:nowrap;background:rgba(127,127,127,.1);color:inherit;opacity:.72;margin:0 6px 0 0;line-height:1.5}
 .space-badge.ok{color:#328b6d;background:#eaf7f0}
 .space-badge.warn{color:#a8771b;background:#fdf4e6}
 .space-badge.err{color:#bf5762;background:#fceff0}
@@ -352,9 +433,12 @@ function html(title: string, body: string) {
 .space-empty{margin:0;color:var(--muted);font-size:14px}
 .space-hints p{margin:0 0 8px;color:#a8661b;line-height:1.6}
 .space-hints p:last-child{margin-bottom:0}
-.space-run{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin:10px 0 0;border-top:1px dashed rgba(127,127,127,.3);padding-top:12px}
+.space-run{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end;margin:12px 0 0;border-top:1px dashed rgba(127,127,127,.3);padding-top:12px}
+    .space-run label{min-width:0}
+    .space-run .space-save{margin-left:auto}
 .space-run label{display:flex;flex-direction:column;gap:5px;font-size:13px;font-weight:600}
-.space-run input[type=text],.space-run input[type=number]{padding:7px 10px;border-radius:8px;border:1px solid rgba(127,127,127,.35);background:transparent;color:inherit;font:inherit;font-size:13.5px;width:200px}
+.space-run input[type=text],.space-run input[type=number]{padding:7px 10px;border-radius:8px;border:1px solid rgba(127,127,127,.35);background:transparent;color:inherit;font:inherit;font-size:13.5px;width:170px;box-sizing:border-box}
+    .space-run input[type=text]{width:230px}
 .space-run input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(97,88,217,.12)}
 .space-run button{margin-top:0}
 .space-run-flag{display:flex;flex-direction:row;align-items:center;gap:7px;font-size:13px;font-weight:600;padding-bottom:8px}
@@ -368,6 +452,29 @@ function organizeNote(saved: number, scanned: number, threshold: number, skipped
   if (saved > 0) return head + "新存了 " + saved + " 条技能，在下面直接跑。" + tail;
   if (skipped > 0) return head + "没有可自动保存的链；跳过了 " + skipped + " 组（含需要确认的工具或已失效的工具）。";
   return head + "没找到重复够 " + (threshold > 0 ? threshold : 3) + " 次的工具链，这次没有新技能。";
+}
+function renderUsage(skills: any[], stats: Record<string, { runs?: number; sources?: { chat: number; page: number } }>, calls: { name: string }[]): string {
+  const runs = Object.values(stats).reduce((sum, item) => sum + (item.runs ?? 0), 0);
+  const chat = Object.values(stats).reduce((sum, item) => sum + (item.sources?.chat ?? 0), 0);
+  const page = Object.values(stats).reduce((sum, item) => sum + (item.sources?.page ?? 0), 0);
+  const cover = new Map<string, string>();
+  for (const skill of skills) for (const step of skill.steps ?? []) if (step?.tool && !cover.has(step.tool)) cover.set(step.tool, String(skill.name ?? skill.id));
+  const counts = new Map<string, number>();
+  let covered = 0;
+  for (const call of calls) {
+    counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
+    if (cover.has(call.name)) covered += 1;
+  }
+  const top = [...counts.entries()].filter(([name]) => cover.has(name)).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  const pct = calls.length ? Math.round(covered / calls.length * 100) : 0;
+  const lines = [
+    "技能累计跑过 " + runs + " 次 · 对话里 " + chat + " 次 · 页面 " + page + " 次。",
+    calls.length
+      ? "最近 " + calls.length + " 次工具调用里，" + covered + " 次（" + pct + "%）用的是已有技能里出现过的工具。"
+      : "还没有工具调用记录。",
+    ...top.map(([name, n]) => "最常手调：" + name + " " + n + " 次，已有技能「" + cover.get(name) + "」可以替代。"),
+  ];
+  return `<section class="space-panel"><h2>利用率</h2>${lines.map(line => `<p class="space-muted">${escape(line)}</p>`).join("")}</section>`;
 }
 function renderSkills(
   skills: (ReturnType<typeof summarize> & { runs?: number; lastStatus?: RunStatus })[],
@@ -385,7 +492,7 @@ function renderSkills(
       const statusClass = skill.status === "仅声明" ? "" : skill.status === "已跑通" ? "ok" : skill.status === "上次失败" ? "warn" : "err";
       const fields = skill.params.map(param => {
         const numeric = param.type === "integer" || param.type === "number";
-        return `<label>${escape(param.label ?? param.name)}${param.required ? "（必填）" : ""}<input name="p:${escape(param.name)}" type="${numeric ? "number" : "text"}"${param.required ? " required" : ""} placeholder="${escape(param.type)}"></label>`;
+        return `<label>${escape(param.label ?? param.name)}${param.required ? "（必填）" : ""}<input name="p:${escape(param.name)}" type="${numeric ? "number" : "text"}"${param.required ? " required" : ""} placeholder="${numeric ? "例如 2" : "输入" + escape(param.label ?? "内容")}"></label>`;
       }).join("");
       const runForm = `<form method="post" action="/plugins/thinking-space/run" class="space-run">
       <input type="hidden" name="id" value="${escape(skill.id)}">
@@ -400,8 +507,8 @@ function renderSkills(
         typeof skill.runs === "number"
           ? `<span class="space-badge ${skill.lastStatus === "ok" ? "ok" : "warn"}">跑过 ${skill.runs} 次${skill.lastStatus === "ok" ? "" : " · 上次 " + escape(String(skill.lastStatus))}</span>`
           : `<span class="space-badge">还没跑过</span>`
-      }${skill.revision ? `<span class="space-badge">rev ${skill.revision}</span>` : ""}<span class="space-muted">${escape(skill.id)}</span></p>
-      <p><a class="btn space-secondary" href="/plugins/thinking-space/edit?id=${escape(skill.id)}">编辑步骤</a></p>
+      }${skill.sources && (skill.sources.chat || skill.sources.page) ? `<span class="space-badge">对话 ${skill.sources.chat} · 页面 ${skill.sources.page}</span>` : ""}${skill.revision ? `<span class="space-badge">rev ${skill.revision}</span>` : ""}<span class="space-muted">${escape(skill.id)}</span></p>
+      <p class="space-card-ops"><a class="btn space-secondary" href="/plugins/thinking-space/edit?id=${escape(skill.id)}">编辑步骤</a></p>
       <details><summary>看步骤与参数</summary>
       <p class="space-muted">输入参数：${escape(skill.params.map(param => (param.label ?? param.name) + " · " + param.type + (param.required ? " · 必填" : "") + (param.aliases?.length ? " · 别名 " + param.aliases.join("/") : "")).join("，") || "无")}</p>
       <ol class="space-steps">${skill.steps.map(step => `<li><code>${escape(step.id)}</code> · ${escape(step.plugin)} / ${escape(step.tool)}${step.available ? "" : " · <strong>工具不可用</strong>"}<pre>${escape(JSON.stringify(step.params, null, 2))}</pre></li>`).join("")}</ol>
@@ -475,6 +582,7 @@ function renderReceipt(result?: RunResult) {
     result.trimmed.dropped.length ? `这条技能跑完自己缩短了：${result.trimmed.from} 步 → ${result.trimmed.to} 步（rev ${result.trimmed.revision}）。删掉的是 ${result.trimmed.dropped.map(item => escape(item.id + " " + item.tool)).join("、")}，因为它的结果没有被后面的步骤用到。` : "",
     result.trimmed.cut?.length ? `候选砍枝（rev ${result.trimmed.revision}）：${result.trimmed.cut.map(item => escape(item.key) + " 只留第一条，砍掉 " + item.droppedCount + " 个从没命中的候选").join("；")}。` : "",
   ].filter(Boolean).join(" ")}</p>` : ""}
+  ${result.relevance ? `<p><span class="space-badge ${result.relevance.status === "matched" ? "ok" : result.relevance.status === "weak" ? "warn" : result.relevance.status === "unrelated" ? "err" : ""}">相关性 ${escape(result.relevance.status)}</span><span class="space-muted">${escape(result.relevance.basis)}</span></p>` : ""}
   <ol class="space-steps">${steps}</ol></section>`;
 }
 function readBody(req: any, limit = 8192): Promise<string> {
@@ -543,6 +651,9 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
     <label class="space-check" style="margin-top:18px"><input type="checkbox" name="allowRiskyChains"${settings.allowRiskyChains ? " checked" : ""}><span>允许整理含确认步骤的链</span></label>
     <p class="space-muted">默认关。开着时，包含写入、执行、发送或发声这类需要确认的工具链也会被整理成技能存下来——但运行到那一步仍然会停下来征求同意，不会自己动手。关着时这类链只在报告里列出来，不进技能库。</p>
 
+    <label class="space-check" style="margin-top:18px"><input type="checkbox" name="observeHands"${settings.observeHands ? " checked" : ""}><span>观测文件类工具的返回值形状</span></label>
+    <p class="space-muted">默认关。开着时 hands_list / hands_read / hands_write / hands_run 的调用也会被记录——只记键名和类型（如 <code>{ok:b,result:s}</code>），不记路径、不记正文。用来给「自动分配端口」攒数据。</p>
+
     <label class="space-check" style="margin-top:18px"><input type="checkbox" name="allowSave"${settings.allowSave ? " checked" : ""}><span>允许保存技能</span></label>
     <p class="space-muted">关掉后 space_skill_save 一律返回 blocked，已有技能不受影响。</p>
 
@@ -588,14 +699,15 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
   </script>
 </section>`;
 }
-function summarize(skill: Skill, catalog: Map<string, ToolContract>, stat?: { runs: number; lastStatus: RunStatus }) {
+function summarize(skill: Skill, catalog: Map<string, ToolContract>, stat?: { runs: number; lastStatus: RunStatus; sources?: { chat: number; page: number } }) {
   const steps = skill.steps.map(step => ({ ...step, available: catalog.get(step.tool)?.plugin === step.plugin }));
   let status = "仅声明";
   try { validateSkill(skill.id, skill, catalog); }
   catch { status = "待核实"; }
   if (status === "仅声明" && stat && stat.runs > 0) status = stat.lastStatus === "ok" ? "已跑通" : "上次失败";
   return { ...skill, steps, stepCount: steps.length, danger: dangerFor(steps, catalog, skill.danger),
-    revision: Number.isFinite(skill.revision) ? Number(skill.revision) : 0, status };
+    revision: Number.isFinite(skill.revision) ? Number(skill.revision) : 0, status,
+    ...(stat?.sources ? { sources: stat.sources } : {}) };
 }
 
 export function apply(ctx: Context) {
@@ -613,6 +725,14 @@ export function apply(ctx: Context) {
     remember(runId, result);
     return result;
   }
+  const skillsBrief = (() => {
+    try {
+      const store = ctx.config<Store>(storeFile);
+      const list = Array.isArray(store?.skills) ? store.skills : [];
+      const items = list.slice(0, 8).map(skill => String(skill.name || skill.id) + "（" + (skill.steps?.length ?? 0) + "步）");
+      return items.length ? "现成技能：" + items.join("、") + "。连着几步的事先用它们，比逐个调工具少一轮对话。" : "";
+    } catch { return ""; }
+  })();
   const catalogByName = async () => new Map((await ctx.tools.catalog()).map(tool => [tool.name, tool]));
   async function readStore(): Promise<Store> {
     const data = await ctx.config.read<Store>(storeFile);
@@ -634,6 +754,7 @@ export function apply(ctx: Context) {
       organizeThreshold: rawThreshold >= 2 && rawThreshold <= 10 ? rawThreshold : 3,
       organizeWindowMinutes: rawWindow >= 5 && rawWindow <= 1440 ? rawWindow : 120,
       autoSaveOrganized: data?.autoSaveOrganized !== false,
+      observeHands: data?.observeHands === true,
       allowRiskyChains: data?.allowRiskyChains === true,
       learnOnRequest: data?.learnOnRequest !== false,
       triggerPhrase: typeof data?.triggerPhrase === "string" && data.triggerPhrase.trim().length
@@ -642,15 +763,132 @@ export function apply(ctx: Context) {
         ? data.canvasScript.trim().slice(0, 500) : defaultCanvasScript };
   }
   const callsFile = "calls.json";
-  type CallRecord = { ts: string; name: string; ok: boolean; session?: string; source?: string; transient?: true };
+  type CallRecord = { ts: string; name: string; ok: boolean; session?: string; source?: string; transient?: true; shape?: string };
   const callsLimit = 800;
+  // 只记返回值的"形状"：键名 + 类型，不记任何内容。
+  // 数组只描述首元素类型，深度最多 3 层，整串截 300 字。
+  function shapeOf(value: unknown, depth = 0): string {
+    if (value === null) return "null";
+    if (value === undefined) return "-";
+    const t = typeof value;
+    if (t === "string") return "s";
+    if (t === "number") return "n";
+    if (t === "boolean") return "b";
+    if (t === "bigint") return "big";
+    if (depth >= 5) return "…";
+    if (Array.isArray(value)) {
+      if (!value.length) return "[]";
+      const head = shapeOf(value[0], depth + 1);
+      const same = value.every(item => shapeOf(item, depth + 1) === head);
+      return "[" + head + (same ? "" : "|…") + "]";
+    }
+    if (t === "object") {
+      const keys = Object.keys(value as Record<string, unknown>);
+      if (!keys.length) return "{}";
+      const shown = keys.slice(0, 10).map(k => k + ":" + shapeOf((value as Record<string, unknown>)[k], depth + 1));
+      return "{" + shown.join(",") + (keys.length > 10 ? ",+" + (keys.length - 10) : "") + "}";
+    }
+    return t;
+  }
+  // 把记录下来的形状反解成端口路径。只读观测，不猜类型之外的东西。
+  function parseShapePorts(text: string, limit = 60): { path: string; type: string }[] {
+    const ports: { path: string; type: string }[] = [];
+    let i = 0;
+    const scalar: Record<string, string> = { s: "string", n: "number", b: "boolean", big: "bigint", null: "null", "-": "undefined", "…": "unknown" };
+    function push(path: string, type: string) {
+      if (!path || ports.length >= limit) return;
+      // 数组自身的类型已经说明了 \"[]\" 这层，元素是对象时不再重复一条 results[]
+      if (type === "object" && path.endsWith("[]")) return;
+      ports.push({ path, type });
+    }
+    function parseValue(path: string): string {
+      if (text[i] === "{") return parseObject(path);
+      if (text[i] === "[") return parseArray(path);
+      const m = /^(null|big|b|n|s|-|…)/.exec(text.slice(i));
+      if (!m) { i = text.length; return "unknown"; }
+      i += m[1].length;
+      const type = scalar[m[1]] ?? "unknown";
+      push(path, type);
+      return type;
+    }
+    function parseObject(path: string): string {
+      i++;
+      push(path, "object");
+      while (i < text.length && text[i] !== "}") {
+        const m = /^([A-Za-z_$][\w$-]*):/.exec(text.slice(i));
+        if (!m) { i++; continue; }
+        i += m[0].length;
+        parseValue(path ? path + "." + m[1] : m[1]);
+        if (text[i] === ",") i++;
+      }
+      if (text[i] === "}") i++;
+      return "object";
+    }
+    function parseArray(path: string): string {
+      i++;
+      push(path, "array");
+      if (text[i] !== "]") {
+        parseValue(path + "[]");
+        while (text[i] === "|") { i++; parseValue(path + "[]"); }
+      }
+      if (text[i] === "]") i++;
+      return "array";
+    }
+    try { parseValue(""); } catch { /* 截断的尾巴不追 */ }
+    return ports;
+  }
+  type ObservedKind = "fields" | "text" | "empty";
+  type ObservedTool = {
+    tool: string; calls: number; shapes: number;
+    ports: { path: string; type: string }[];
+    trusted: boolean;
+    /** fields 有可连的字段口；text 只有一整段文本；empty 观测到空返回。 */
+    kind: ObservedKind;
+    note?: string;
+  };
+  async function observePorts(tool?: string): Promise<ObservedTool[]> {
+    const calls = await readCalls();
+    const map = new Map<string, { calls: number; shapes: Map<string, number> }>();
+    for (const item of calls) {
+      if (!item.shape) continue;
+      const row = map.get(item.name) ?? { calls: 0, shapes: new Map<string, number>() };
+      row.calls += 1;
+      row.shapes.set(item.shape, (row.shapes.get(item.shape) ?? 0) + 1);
+      map.set(item.name, row);
+    }
+    const list: ObservedTool[] = [];
+    for (const [name, row] of map) {
+      if (tool && name !== tool) continue;
+      const ranked = [...row.shapes.entries()].sort((a, b) => b[1] - a[1]);
+      const shape = ranked[0][0];
+      const ports = parseShapePorts(shape);
+      const kind: ObservedKind =
+        shape === "[]" || shape === "{}" || shape === "null" || shape === "-" ? "empty"
+        : shape === "s" ? "text"
+        : ports.length ? "fields" : "text";
+      const note =
+        kind === "text" ? "整段文本口，没有可拆的字段。要接下一步只能整段传，或者先被人读一遍。"
+        : kind === "empty" ? "观测到的返回是空的，推不出端口。"
+        : undefined;
+      list.push({ tool: name, calls: row.calls, shapes: row.shapes.size,
+        ports, trusted: ranked[0][1] >= 3, kind, ...(note ? { note } : {}) });
+    }
+    return list.sort((a, b) => b.calls - a.calls);
+  }
+  function shapeText(value: unknown): string | undefined {
+    try {
+      const text = shapeOf(value);
+      return text.length > 300 ? text.slice(0, 300) : text;
+    } catch { return undefined; }
+  }
   let callLog: CallRecord[] | null = null;
   async function readCalls(): Promise<CallRecord[]> {
     if (callLog) return callLog;
     try {
       const data = await ctx.config.read<CallRecord[]>(callsFile);
+      const cfg = await readSettings();
       callLog = Array.isArray(data)
-        ? data.filter(item => record(item) && typeof item.name === "string" && !item.name.startsWith("hands_"))
+        ? data.filter(item => record(item) && typeof item.name === "string" && (cfg.observeHands || !item.name.startsWith("hands_")))
         : [];
     } catch { callLog = []; }
     return callLog;
@@ -670,15 +908,17 @@ export function apply(ctx: Context) {
   }
   ctx.on("tool/called", async (payload) => {
     if (!payload || typeof payload.name !== "string") return;
-    if (["space_run", "space_trace", "space_skills", "space_organize", "space_draft"].includes(payload.name)) return;
-    // hands_ 全是需要确认的动手工具，永远会被跳过；记了只是噪声。
-    if (payload.name.startsWith("hands_") || payload.name.startsWith("space_")) return;
+    if (["space_run", "space_trace", "space_skills", "space_organize", "space_draft", "space_ports"].includes(payload.name)) return;
+    // space_ 自己的调用不进观测；hands_ 默认跳过，可在设置里打开观测（只记形状，不记内容）。
+    if (payload.name.startsWith("space_")) return;
+    if (payload.name.startsWith("hands_") && !(await readSettings()).observeHands) return;
     // transient：工具结果不进历史。这里只记工具名和成败，不记参数、不记结果。
     await recordCall({
       ts: new Date().toISOString(), name: payload.name, ok: payload.ok !== false,
       session: typeof payload.session === "string" ? payload.session : undefined,
       source: typeof payload.source === "string" ? payload.source : undefined,
       transient: payload.transient === true ? true : undefined,
+      shape: shapeText(payload.result),
     });
   });
   type Chain = { tools: string[]; count: number; lastAt: string; sessions: number };
@@ -747,7 +987,20 @@ export function apply(ctx: Context) {
     }
     return kept.sort((a, b) => b.count - a.count || b.tools.length - a.tools.length);
   }
-  function draftSpec(names: string[], catalog: Map<string, ToolContract>, name: string, description: string) {
+  /** 工具自己没写默认值的必填参数，可以在这里补一份。文件 param-defaults.json，形如 {"image_view":{"path":"/path/to/your/image.png"}}。只影响自动整理学出来的技能，不改别的插件的 schema。 */
+  async function readParamDefaults(): Promise<Record<string, Record<string, unknown>>> {
+    try {
+      const raw = await ctx.config.read<Record<string, unknown>>(paramDefaultsFile);
+      if (!record(raw)) return {};
+      const out: Record<string, Record<string, unknown>> = {};
+      for (const [tool, table] of Object.entries(raw)) {
+        if (record(table)) out[tool] = table as Record<string, unknown>;
+      }
+      return out;
+    } catch { return {}; }
+  }
+  function draftSpec(names: string[], catalog: Map<string, ToolContract>, name: string, description: string,
+    defaults: Record<string, Record<string, unknown>> = {}) {
     const declaredParams: { name: string; type: string; required: boolean }[] = [];
     const typeOf = (schema: unknown): string => {
       const raw = record(schema) ? (schema as any).type : "string";
@@ -760,6 +1013,8 @@ export function apply(ctx: Context) {
       const properties: Record<string, unknown> = record(schema.properties) ? schema.properties as Record<string, unknown> : {};
       const params: Record<string, unknown> = {};
       for (const field of required) {
+        const preset = (properties[field] as any)?.default ?? defaults[tool]?.[field];
+        if (preset !== undefined) { params[field] = preset; continue; }
         const type = typeOf(properties[field]);
         const clash = declaredParams.find(item => item.name === field && item.type !== type);
         const key = clash ? "n" + (index + 1) + "_" + field : field;
@@ -772,20 +1027,100 @@ export function apply(ctx: Context) {
     return { schemaVersion: 1, name, kind: names.length === 1 ? "single" : "composite",
       description, params: declaredParams, steps } as Record<string, unknown>;
   }
+  function autoFillable(chain: string[], catalog: Map<string, any>, defaults: Record<string, Record<string, unknown>> = {}): string | null {
+    for (const tool of chain) {
+      const schema: any = catalog.get(tool)?.inputSchema ?? {};
+      const required: string[] = Array.isArray(schema.required) ? schema.required : [];
+      const props: any = record(schema.properties) ? schema.properties : {};
+      for (const field of required) {
+        if ((props[field] as any)?.default === undefined && defaults[tool]?.[field] === undefined) return "必填参数 " + field + "（" + tool + "）没有默认值，自动整理不知道填什么。";
+      }
+    }
+    return null;
+  }
+  /** 插件工具大多没写 displayName，这里给常见工具一个中文名兜底，自动命名才不至于露出一串下划线。 */
+  const TOOL_LABELS: Record<string, string> = {
+    "ledger_today": "今天用量",
+    "usage_today": "最近用量",
+    "budget_set": "设预算",
+    "surf_search": "网上搜索",
+    "surf_read": "读网页",
+    "surf_status": "冲浪状态",
+    "workbench_search_read": "搜完就读",
+    "comfy_status": "绘图环境",
+    "comfy_generate": "出图",
+    "image_view": "看图",
+    "see_now": "看屏幕",
+    "bili_search": "找B站视频",
+    "bili_video": "看视频信息",
+    "bili_subtitle": "看字幕",
+    "bilibili_status": "B站状态",
+    "bilibili_search": "B站搜索",
+    "bilibili_open": "打开B站视频",
+    "bilibili_comments": "看评论",
+    "hands_list": "列目录",
+    "hands_read": "读文件",
+    "hands_write": "写文件",
+    "hands_run": "跑命令",
+    "gsv_start": "启动嗓音",
+    "gsv_stop": "停嗓音",
+    "gsv_status": "嗓音状态",
+    "ear_start": "开耳朵",
+    "ear_stop": "关耳朵",
+    "ear_status": "耳朵状态",
+    "mouth_say": "念出来",
+    "meme_categories": "表情分类",
+    "meme_pick": "挑表情",
+    "chime_test": "响一声",
+    "watcher_check": "查监控",
+    "watcher_send": "发监控",
+    "scribe_transcribe": "转文字",
+    "scribe_correct": "校对",
+    "scribe_run": "转写一条龙",
+    "deepclef_status": "机器人在哪",
+    "deepclef_observe": "看四周",
+    "deepclef_goto": "走过去",
+    "deepclef_follow": "跟着我",
+    "deepclef_stop": "停下",
+    "deepclef_task": "派个活",
+    "deepclef_progress": "看进度",
+    "deepclef_inventory": "清点背包",
+    "space_skills": "列技能",
+    "space_run": "跑技能",
+    "space_draft": "起技能草稿",
+    "space_organize": "整理技能",
+    "space_trace": "看回执",
+  };
+  function toolLabel(tool: string, catalog: Map<string, any>): string {
+    const fromCatalog = String(catalog.get(tool)?.displayName ?? "").trim();
+    if (fromCatalog && fromCatalog !== tool) return fromCatalog;
+    return TOOL_LABELS[tool] ?? tool;
+  }
+  function autoName(chain: string[], catalog: Map<string, any>): string {
+    const labels = chain.map(tool => {
+      const label = toolLabel(tool, catalog);
+      return label && label !== tool ? label.slice(0, 12) : tool;
+    });
+    return labels.slice(0, 2).join("·") + (labels.length > 2 ? " 等" + labels.length + "步" : "");
+  }
   function autoId(tools: string[]) {
     let hash = 0;
     for (const tool of tools) for (const ch of tool) hash = (hash * 31 + ch.charCodeAt(0)) % 0x7fffffff;
     return "auto-" + hash.toString(36);
   }
   const statsFile = "stats.json";
-  type Reason = "input" | "timeout" | "external" | "empty" | "skipped" | "other";
+  type Reason = "input" | "timeout" | "external" | "empty" | "skipped" | "cancelled" | "blocked" | "other";
   type Stat = { runs: number; ok: number; failed: number; streak: number; lastAt: string; lastStatus: RunStatus;
+    sources?: { chat: number; page: number };
     reasons?: Record<Reason, number>; candidates?: Record<string, { runs: number; first: number }> };
   function classifyFailure(status: RunStatus, error: string): Reason {
+    if (status === "blocked") return "blocked";
     if (status === "skipped") return "skipped";
-    if (/缺少必填参数|占位|参数|不匹配|无效|找不到这条技能|须为/.test(error)) return "input";
+    if (/取消|已停止|cancel|abort/i.test(error)) return "cancelled";
+    if (/缺少必填参数|占位|参数|不匹配|无效|找不到这条技能|须为|越界/.test(error)) return "input";
     if (/超时|timeout|结果未知/i.test(error)) return "timeout";
-    if (/unsupported_content|access_blocked|network|ECONN|ENOTFOUND|HTTP \d|业务错误|拒绝/.test(error)) return "external";
+    if (/没有搜索结果|无搜索结果|候选值全都取不到|没有有效链接|没有可试的输入|这一步没有可试/.test(error)) return "empty";
+    if (/读取失败|抓不到|打不开|unsupported_content|access_blocked|network|ECONN|ENOTFOUND|HTTP \d|业务错误|拒绝/.test(error)) return "external";
     return "other";
   }
   async function readStats(): Promise<Record<string, Stat>> {
@@ -804,25 +1139,39 @@ export function apply(ctx: Context) {
       return dropped;
     } catch { return 0; }
   }
-  async function bumpStat(skillId: string, status: RunStatus, error = "") {
+  const failuresFile = "failures.json";
+  type Failure = { at: string; skill: string; status: RunStatus; reason: Reason; error: string };
+  async function recordFailure(skillId: string, status: RunStatus, error: string) {
+    try {
+      const data = await ctx.config.read<Failure[]>(failuresFile);
+      const list = Array.isArray(data) ? data : [];
+      list.push({ at: new Date().toISOString(), skill: skillId, status, reason: classifyFailure(status, error), error: String(error || "没有给出原因").slice(0, 300) });
+      if (list.length > 200) list.splice(0, list.length - 200);
+      await ctx.config.save(failuresFile, list);
+    } catch { /* 失败记录写不进去，不影响这次执行 */ }
+  }
+  async function bumpStat(skillId: string, status: RunStatus, error = "", source: "chat" | "page" = "chat") {
     try {
       const stats = await readStats();
       const stat: Stat = stats[skillId] ?? { runs: 0, ok: 0, failed: 0, streak: 0, lastAt: "", lastStatus: status,
-        reasons: { input: 0, timeout: 0, external: 0, empty: 0, skipped: 0, other: 0 } };
-      if (!stat.reasons) stat.reasons = { input: 0, timeout: 0, external: 0, empty: 0, skipped: 0, other: 0 };
-      else for (const key of ["input", "timeout", "external", "empty", "skipped", "other"] as Reason[])
+        reasons: { input: 0, timeout: 0, external: 0, empty: 0, skipped: 0, cancelled: 0, blocked: 0, other: 0 } };
+      if (!stat.reasons) stat.reasons = { input: 0, timeout: 0, external: 0, empty: 0, skipped: 0, cancelled: 0, blocked: 0, other: 0 };
+      else for (const key of ["input", "timeout", "external", "empty", "skipped", "cancelled", "blocked", "other"] as Reason[])
         if (!Number.isFinite(stat.reasons[key])) stat.reasons[key] = 0;
       // 早期版本没有 reasons 分类，历史失败没有任何原因记录。
       // 差额补到 other，避免出现「失败 5 次，原因全是 0」这种自相矛盾的数字。
       const reasonSum = stat.reasons.input + stat.reasons.timeout + stat.reasons.external
-        + stat.reasons.empty + stat.reasons.skipped + stat.reasons.other;
+        + stat.reasons.empty + stat.reasons.skipped + stat.reasons.cancelled + stat.reasons.blocked + stat.reasons.other;
       if (stat.failed > reasonSum) stat.reasons.other += stat.failed - reasonSum;
       stat.runs += 1;
       if (status === "ok") { stat.ok += 1; stat.streak = 0; }
       else {
         stat.failed += 1; stat.streak += 1;
         stat.reasons[classifyFailure(status, error)] += 1;
+        await recordFailure(skillId, status, error);
       }
+      if (!stat.sources) stat.sources = { chat: 0, page: 0 };
+      stat.sources[source] = (stat.sources[source] ?? 0) + 1;
       stat.lastAt = new Date().toISOString();
       stat.lastStatus = status;
       stats[skillId] = stat;
@@ -935,6 +1284,8 @@ export function apply(ctx: Context) {
     if (reasons.external > 0) parts.push(reasons.external + " 次外部服务拒绝或网络问题");
     if (reasons.empty > 0) parts.push(reasons.empty + " 次上游没数据");
     if (reasons.skipped > 0) parts.push(reasons.skipped + " 次跳过了没跑成的步骤");
+    if (reasons.cancelled > 0) parts.push(reasons.cancelled + " 次被取消");
+    if (reasons.blocked > 0) parts.push(reasons.blocked + " 次前置条件不满足");
     if (reasons.other > 0) parts.push(reasons.other + " 次其他原因");
     return parts.join("，");
   }
@@ -983,6 +1334,21 @@ export function apply(ctx: Context) {
     saveQueue = pending;
     return pending;
   }
+  ctx.tools.register<{ tool?: string }>({
+    name: "space_ports", displayName: "看工具端口", danger: "safe",
+    description: "读工具调用记录里存下来的返回值形状，反推出每个工具的输出端口路径和类型。是观测不是声明：trusted 为 true 表示同一形状出现过三次以上。拼技能或连线时用它查上一步哪个字段能接下去。",
+    schema: { type: "object", additionalProperties: false,
+      properties: { tool: { type: "string", description: "只看这一个工具，省略看全部" } } },
+    async run(args) {
+      const only = typeof args?.tool === "string" && args.tool.trim() ? args.tool.trim() : undefined;
+      const list = await observePorts(only);
+      if (!list.length) return { tools: [], note: only ? "这个工具没有观测记录。" : "还没有观测记录。跑过几次工具之后这里才有东西。" };
+      const counted = { fields: 0, text: 0, empty: 0 };
+      for (const item of list) counted[item.kind] += 1;
+      const summary = `${list.length} 个工具有形状：${counted.fields} 个有字段口，${counted.text} 个是整段文本口，${counted.empty} 个空返回。`;
+      return { tools: list, summary };
+    },
+  });
   ctx.tools.register({
     name: "space_skills", displayName: "列出思维空间技能", danger: "safe",
     description: "列出服务端技能的名称、说明、步数、权限和验证状态，并返回自动整理和允许使用技能开关状态。allowUse 为 false 时不得使用已保存技能；当前版本只提供存储，尚无技能执行器。",
@@ -1059,7 +1425,7 @@ export function apply(ctx: Context) {
   async function runOrganize(force: boolean) {
     const settings = await readSettings();
     if (!settings.autoOrganize && !force) return { status: "blocked", error: "自动整理已关闭，可在思维空间设置里打开。" };
-    const [calls, store, catalog] = await Promise.all([readCalls(), readStore(), catalogByName()]);
+    const [calls, store, catalog, paramDefaults] = await Promise.all([readCalls(), readStore(), catalogByName(), readParamDefaults()]);
     const known = new Set(store.skills.map(skill => skill.steps.map(step => step.tool).join("\u0000")));
     const readonly = new Set([...catalog.values()].filter(tool => tool.danger === "safe").map(tool => tool.name));
     const chains = chainsFrom(calls, settings.organizeThreshold, settings.organizeWindowMinutes, readonly)
@@ -1081,13 +1447,14 @@ export function apply(ctx: Context) {
       if (unknown.length) { skip(chain, "工具已不存在：" + unknown.join("、")); continue; }
       const dangerous = chain.tools.some(tool => (catalog.get(tool) as any)?.danger && (catalog.get(tool) as any).danger !== "safe");
       if (dangerous && !settings.allowRiskyChains) { skip(chain, "链里有需要确认的工具，不自动保存。"); continue; }
+      { const why = autoFillable(chain.tools, catalog, paramDefaults); if (why) { skip(chain, why); continue; } }
       if (usable.length < 3) usable.push(chain);
     }
     for (const chain of usable) {
       const id = autoId(chain.tools);
-      const name = "自动整理：" + chain.tools.join(" → ");
+      const name = autoName(chain.tools, catalog);
       const risky = chain.tools.some(tool => (catalog.get(tool) as any)?.danger && (catalog.get(tool) as any).danger !== "safe");
-      const spec = draftSpec(chain.tools, catalog, name, "自动整理，出现 " + chain.count + " 次。" + (risky ? "含需要确认的步骤，运行到那一步会先停下来征求同意。" : ""));
+      const spec = draftSpec(chain.tools, catalog, name, "自动整理，出现 " + chain.count + " 次。" + (risky ? "含需要确认的步骤，运行到那一步会先停下来征求同意。" : ""), paramDefaults);
       const result: any = settings.autoSaveOrganized ? await save(id, spec) : { status: "ok", id, created: false };
       if (result.status === "ok") { saved += 1; report.push({ id, name, tools: chain.tools, status: "saved" }); }
       else report.push({ id, name, tools: chain.tools, status: "blocked", error: result.error });
@@ -1152,7 +1519,7 @@ export function apply(ctx: Context) {
       try {
         const store = await readStore();
         const found = store.skills.find(item => item.id === args?.id);
-        if (!found) return blocked(runId, args?.id ?? "", "找不到这条技能。");
+        if (!found) return blocked(runId, args?.id ?? "", "找不到这条技能。" + (skillsBrief ? " " + skillsBrief : " 技能库里还没有保存任何技能。"));
         skill = found;
       } catch (error) {
         return blocked(runId, args?.id ?? "", error instanceof Error ? error.message : "技能库读不到。");
@@ -1184,10 +1551,20 @@ export function apply(ctx: Context) {
       let lastStatus: RunStatus = "ok";
       for (const step of skill.steps) {
         if (session.signal?.aborted) { lastStatus = "uncertain"; break; }
-        const plans = expandTry(fill(step.params, givenIds as JsonObject, previous) as JsonObject);
+        const filledStep = fill(step.params, givenIds as JsonObject, previous) as JsonObject;
+        const rankInfo = resolveRank(filledStep);
+        if (rankInfo.error) {
+          steps.push({ id: step.id, tool: step.tool, plugin: step.plugin, status: "failed", elapsedMs: 0, input: null, output: null,
+            error: rankInfo.error });
+          lastStatus = "failed";
+          break;
+        }
+        const plans = expandTry(filledStep, rankInfo.rank);
         if (!plans.length) {
           steps.push({ id: step.id, tool: step.tool, plugin: step.plugin, status: "empty", elapsedMs: 0, input: null, output: null,
-            error: "候选值全都取不到，这一步没有可试的输入。" });
+            error: rankInfo.rank !== undefined
+              ? "指定的第 " + rankInfo.rank + " 条候选没有有效链接，没有发起读取。"
+              : "候选值全都取不到，这一步没有可试的输入。" });
           lastStatus = "empty";
           break;
         }
@@ -1245,12 +1622,15 @@ export function apply(ctx: Context) {
             break;
           }
           steps.push({ id: step.id, tool: step.tool, plugin: step.plugin, status: "ok", elapsedMs, input, output, ...(attempts.length ? { attempts } : {}),
-            ...(tryKeys.length && hitIndex >= 0 ? { tries: [{ key: tryKeys[0], hit: hitIndex, total: plans.length }] } : {}) });
+            ...(tryKeys.length && (hitIndex >= 0 || rankInfo.rank !== undefined) ? { tries: [{ key: tryKeys[0],
+            hit: rankInfo.rank !== undefined ? rankInfo.rank - 1 : hitIndex,
+            total: rankInfo.total ?? plans.length,
+            ...(rankInfo.rank !== undefined ? { requested: rankInfo.rank } : {}) }] } : {}) });
           previous.set(step.id, output);
           // 上游没产出：结果为空，或下一步参数里仍留着解析不了的占位符 → empty，后续步骤不启动
           {
             const nextStep = skill.steps.find(item => item.id === step.next);
-            if (nextStep && (isEmptyFeed(output) || unresolved(fill(nextStep.params, givenIds as JsonObject, previous)))) {
+            if (nextStep && (isEmptyFeed(output) || unresolved(withoutMeta(fill(nextStep.params, givenIds as JsonObject, previous))))) {
               if (!dependents(skill, step.id).length) {
                 const last = steps[steps.length - 1];
                 if (last && last.id === step.id) {
@@ -1274,11 +1654,15 @@ export function apply(ctx: Context) {
           break;
         }
       }
+      // 读到东西不等于读对了：拿用户那句查询跟最后一步的正文比一下字面重合。
+      const queryText = Object.values(givenIds).find(value => typeof value === "string" && (value as string).trim().length >= 2) as string | undefined;
+      const lastOk = [...steps].reverse().find(item => item.status === "ok" && item.output !== null && item.output !== undefined);
+      const relevance = lastStatus === "ok" && lastOk ? checkRelevance(queryText, lastOk.output) : null;
       // 全部步骤都被跳过，等于一步都没干成：不能报 skipped 让人以为没事，抬成 failed
       const allSkipped = steps.length > 0 && steps.every(item => item.status === "skipped");
       if (allSkipped) lastStatus = "failed";
-      await bumpStat(skill.id, lastStatus, steps[steps.length - 1]?.error ?? "");
-      const result: RunResult & { staleDefinition?: boolean; definitionRevision?: number } = { status: lastStatus, runId, skill: skill.id, steps };
+      await bumpStat(skill.id, lastStatus, steps[steps.length - 1]?.error ?? "", (session as any)?.origin?.action === "web_run" ? "page" : "chat");
+      const result: RunResult & { staleDefinition?: boolean; definitionRevision?: number } = { status: lastStatus, runId, skill: skill.id, steps, ...(relevance ? { relevance } : {}) };
       if (allSkipped) result.error = "所有步骤都没跑成，这条技能什么都没做。第一步：" + (steps[0]?.error ?? "没有给出原因");
       else if (lastStatus === "empty") result.error = "上游没有产出数据，后续步骤没有启动。";
       else if (lastStatus === "skipped") result.error = "有步骤没跑成，但后面的步骤不依赖它，已继续跑到最后：" + steps.filter(item => item.status === "skipped").map(item => item.id + "（" + (item.error ?? "没有产出") + "）").join("、");
@@ -1348,6 +1732,7 @@ export function apply(ctx: Context) {
     const running = await canvasPid();
     if (running) { canvasError = undefined; return `画布已经在跑了（PID ${running}）。`; }
     const script = (await readSettings()).canvasScript;
+    if (!script) { canvasError = "还没配置画布脚本路径：设置页 → 画布服务 → 画布脚本路径，填完整路径。"; return canvasError; }
     if (!existsSync(script)) { canvasError = `找不到脚本：${script}`; return canvasError; }
     try {
       const child = spawn(process.execPath, [script], { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
@@ -1406,12 +1791,12 @@ export function apply(ctx: Context) {
       const [skills, stats, settings] = await Promise.all([list(), readStats(), readSettings()]);
       const withStats = skills.map((skill) => {
         const stat = stats[skill.id];
-        return { ...skill, ...(stat ? { runs: stat.runs, lastStatus: stat.lastStatus } : {}) };
+        return { ...skill, ...(stat ? { runs: stat.runs, lastStatus: stat.lastStatus, sources: stat.sources } : {}) };
       });
       const hints = settings.autoOrganize ? hintsFor(withStats, stats) : [];
             const organizePanel = organized === null ? "" : `<section class="space-panel"><h2>整理结束</h2><p>${escape(organizeNote(Number(organized), Number(query.get("scanned") ?? 0), Number(query.get("threshold") ?? 0), Number(query.get("skipped") ?? 0)))}</p></section>`;
       const organizeButton = `<form method="post" action="/plugins/thinking-space/organize" style="display:inline-flex;margin:0 0 0 10px"><button class="btn space-secondary" type="submit">立即整理</button></form>`;
-      const body = `<div class="space-toolbar"><a class="btn space-secondary" href="${pagePath}">← 返回设置</a>${organizeButton}</div>` + receipt + organizePanel + renderSkills(withStats, hints);
+      const body = `<div class="space-toolbar"><a class="btn space-secondary" href="${pagePath}">← 返回设置</a>${organizeButton}</div>` + receipt + organizePanel + renderUsage(withStats, stats, await readCalls()) + renderSkills(withStats, hints);
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html("思维空间", body));
     } catch {
@@ -1565,6 +1950,7 @@ export function apply(ctx: Context) {
         organizeThreshold: (() => { const n = Math.floor(Number(form.get("organizeThreshold"))); return n >= 2 && n <= 10 ? n : 3; })(),
         organizeWindowMinutes: (() => { const n = Math.floor(Number(form.get("organizeWindowMinutes"))); return n >= 5 && n <= 1440 ? n : 120; })(),
         autoSaveOrganized: form.get("autoSaveOrganized") === "on",
+        observeHands: form.get("observeHands") === "on",
         allowRiskyChains: form.get("allowRiskyChains") === "on",
         learnOnRequest: form.get("learnOnRequest") === "on",
         triggerPhrase: (() => { const v = String(form.get("triggerPhrase") ?? "").trim(); return v ? v.slice(0, 80) : defaultTriggerPhrase; })(),

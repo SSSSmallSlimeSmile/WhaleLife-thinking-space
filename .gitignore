@@ -5,6 +5,18 @@ data/calls.json
 data/stats.json
 data/settings.json
 data/backup/
+
+# 插件自己的数据目录：只保留 settings.example.json，其余不入库
+plugins/thinking-space/data/config.json
+plugins/thinking-space/data/skills.json
+plugins/thinking-space/data/calls.json
+plugins/thinking-space/data/stats.json
+plugins/thinking-space/data/settings.json
+plugins/thinking-space/data/failures.json
+plugins/thinking-space/data/param-defaults.json
+plugins/thinking-space/data/backup/
+plugins/thinking-space/data/media/
+
 *.bak-*
 *.bak
 *.log
