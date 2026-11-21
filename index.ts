@@ -545,7 +545,7 @@ function renderUsage(skills: any[], stats: Record<string, { runs?: number; sourc
   const top = [...counts.entries()].filter(([name]) => cover.has(name)).sort((a, b) => b[1] - a[1]).slice(0, 3);
   const pct = calls.length ? Math.round(covered / calls.length * 100) : 0;
   const lines = [
-    "技能累计跑过 " + runs + " 次 · 用户点名 " + byUser + " 次 · 勘自主 " + bySelf + " 次 · 页面 " + page + " 次" + (chat ? " · 旧记录 " + chat + " 次（未分类）" : "") + "。",
+    "技能累计跑过 " + runs + " 次 · 用户点名 " + byUser + " 次 · 主动选择 " + bySelf + " 次 · 页面 " + page + " 次" + (chat ? " · 旧记录 " + chat + " 次（未分类）" : "") + "。",
     calls.length
       ? "最近 " + calls.length + " 次工具调用里，" + covered + " 次（" + pct + "%）用的是已有技能里出现过的工具。"
       : "还没有工具调用记录。",
@@ -1832,7 +1832,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         id: { type: "string" },
         params: { type: "object" },
         confirmSideEffects: { type: "boolean", description: "链中含副作用步骤时必须显式为 true。" },
-        via: { type: "string", enum: ["user", "self"], description: "谁发起的，只用于统计：用户明确点名这条技能填 user；勘自己判断该用填 self（默认）。" },
+        via: { type: "string", enum: ["user", "self"], description: "谁发起的，只用于统计：用户明确点名这条技能填 user；自己判断该用填 self（默认）。" },
       } },
     async run(args, session) {
       const runId = "run_" + Date.now().toString(36) + "_" + (++runSeq);
