@@ -726,7 +726,7 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
   <h2>当前状态</h2>
   <p><span class="space-badge">${stats.total} 条技能</span><span class="space-badge">单步 ${stats.single}</span><span class="space-badge">复合 ${stats.composite}</span></p>
   <p class="space-muted">自动整理思维：${settings.autoOrganize ? "开着" : "关着"}。技能列表里每条会显示跑过几次、上次成没成；连着几次没跑成会单独提醒你看一眼。</p>
-  <p style="margin-top:12px"><a class="btn space-secondary" href="${pagePath}space">查看技能列表 →</a></p>
+  <p style="margin-top:12px"><a class="btn space-secondary" href="${pagePath}space">查看技能列表 →</a><a class="btn space-secondary" href="${pagePath}local" style="margin-left:8px">查看本机能力 →</a></p>
 </section>
 <section class="space-panel">
   <h2>设置</h2>
@@ -872,8 +872,35 @@ async function callLlm(plan: JsonObject) {
   return { ok: true, data: { text, model: pick.id } };
 }
 
+const hasToolCatalog = () => typeof (ctx.tools as any)?.catalog === "function";
+const hasToolList = () => typeof (ctx.tools as any)?.list === "function";
+/** 读本机工具：新宿主用 catalog()，旧宿主退回 list()。拿不到的字段留空，不假造。 */
+const toolsSafe = async (): Promise<any[]> => {
+  const tools: any = ctx.tools;
+  if (typeof tools?.catalog === "function") {
+    try {
+      return await tools.catalog();
+    } catch {
+      // catalog 存在但读失败，往下试 list
+    }
+  }
+  if (typeof tools?.list === "function") {
+    const raw = await tools.list();
+    return (Array.isArray(raw) ? raw : [])
+      .map((item: any) => ({
+        name: String(item?.function?.name ?? item?.name ?? ""),
+        description: String(item?.function?.description ?? ""),
+        plugin: "",
+        danger: "",
+        displayName: "",
+      }))
+      .filter((item: any) => item.name);
+  }
+  return [];
+};
+
 const catalogByName = async () => new Map([
-  ...(await ctx.tools.catalog()).map(tool => [tool.name, tool] as const),
+  ...(await toolsSafe()).map(tool => [tool.name, tool] as const),
   [LLM_TOOL, llmContract] as const,
 ]);
   async function readStore(): Promise<Store> {
@@ -2085,7 +2112,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         res.end(html("编辑技能", `<div class="space-toolbar"><a class="btn space-secondary" href="/plugins/thinking-space/space">← 返回技能列表</a></div><section class="space-panel"><h2>找不到这条技能</h2><p class="space-muted">技能 ID：${escape(id || "（空）")}</p></section>`));
         return;
       }
-      const tools = (await ctx.tools.catalog()).map(tool => tool.name).sort();
+      const tools = (await toolsSafe()).map(tool => tool.name).sort();
       const saved = query.get("saved") === "1";
       const notice = saved ? `已保存。${skill.steps.length} 个步骤都在，下次运行会用新参数。` : (query.get("err") ?? "");
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -2341,7 +2368,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       res.end(JSON.stringify(body));
     };
     try {
-      const list = await ctx.tools.catalog();
+      const list = await toolsSafe();
       const tools = (Array.isArray(list) ? list : []).map((tool: any) => ({
         name: String(tool?.name ?? ""),
         displayName: String(tool?.displayName ?? tool?.name ?? ""),
@@ -2392,6 +2419,64 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
     }
   });
 
+  ctx.web.page(pagePath + "local", async (_req: any, res: any) => {
+    try {
+      const tools = await toolsSafe();
+      const byPlugin = new Map<string, number>();
+      for (const tool of tools) {
+        const key = String(tool.plugin || "").trim() || "未标注";
+        byPlugin.set(key, (byPlugin.get(key) ?? 0) + 1);
+      }
+      const catalogOn = hasToolCatalog();
+      const listOn = hasToolList();
+      const store = await readStore().catch(() => ({ schemaVersion: 1, skills: [] } as Store));
+      const skillCount = Array.isArray(store.skills) ? store.skills.length : 0;
+      const dash = `<span class="space-muted">未声明</span>`;
+      const cell = `style="padding:4px 8px"`;
+      const toolRows = tools.length
+        ? tools
+            .slice()
+            .sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)))
+            .map((tool: any) => {
+              const outputs = Array.isArray(tool.outputs) ? tool.outputs.length : 0;
+              return `<tr><td ${cell}><code>${escape(String(tool.name))}</code></td>` +
+                `<td ${cell}>${tool.displayName ? escape(String(tool.displayName)) : dash}</td>` +
+                `<td ${cell}>${tool.plugin ? escape(String(tool.plugin)) : dash}</td>` +
+                `<td ${cell}>${tool.danger ? escape(String(tool.danger)) : dash}</td>` +
+                `<td ${cell}>${outputs ? outputs + " 个" : dash}</td></tr>`;
+            })
+            .join("")
+        : `<tr><td colspan="5" class="space-muted">一个工具都没读到，这台宿主的工具接口不可用。</td></tr>`;
+      const pluginRows = [...byPlugin.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => `<tr><td ${cell}>${escape(name)}</td><td ${cell}>${count}</td></tr>`)
+        .join("");
+      const hint = catalogOn
+        ? "宿主提供 catalog()，插件归属、危险等级、输出声明都能读到。工具来自当前装载的插件，装什么就有什么，不会写死在技能库里。"
+        : "这台宿主没有 catalog()，用的是 list() 降级读取：工具名和描述能用，插件归属、危险等级、输出声明拿不到，画布端口会标「未声明」。升级宿主后重新打开这一页即可。";
+      const table = `width:100%;border-collapse:collapse;font-size:13px;text-align:left`;
+      const body = `<div class="space-toolbar"><a class="btn space-secondary" href="${pagePath}">← 返回设置</a></div>` +
+        `<section class="space-panel"><h2>本机能力</h2>` +
+        `<p><span class="space-badge${catalogOn ? "" : " warn"}">catalog ${catalogOn ? "可用" : "不可用"}</span>` +
+        `<span class="space-badge${listOn ? "" : " warn"}">list ${listOn ? "可用" : "不可用"}</span>` +
+        `<span class="space-badge">${tools.length} 个工具</span>` +
+        `<span class="space-badge">${skillCount} 条技能</span></p>` +
+        `<p class="space-muted">${escape(hint)}</p></section>` +
+        `<section class="space-panel"><h2>按插件分组</h2>` +
+        (pluginRows
+          ? `<table style="${table}"><thead><tr><th ${cell}>插件</th><th ${cell}>工具数</th></tr></thead><tbody>${pluginRows}</tbody></table>`
+          : `<p class="space-muted">没有可分组的工具。</p>`) +
+        `</section>` +
+        `<section class="space-panel"><h2>工具清单</h2>` +
+        `<table style="${table}"><thead><tr><th ${cell}>工具名</th><th ${cell}>中文名</th><th ${cell}>插件</th><th ${cell}>危险级</th><th ${cell}>输出声明</th></tr></thead><tbody>${toolRows}</tbody></table>` +
+        `</section>`;
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(html("本机能力", body));
+    } catch (err: any) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(html("本机能力", `<p>读本机能力时出错：${escape(String(err?.message || err))}</p>`));
+    }
+  }, { title: "本机能力", navigation: false });
   ctx.web.page("/plugins/thinking-space/settings", async (req: any, res: any) => {
     try {
       const query = new URL(req.url ?? "/", "http://localhost").searchParams;

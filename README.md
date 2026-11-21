@@ -94,6 +94,7 @@ README.md                   本文件
 | `/plugins/thinking-space/space` | 功能库 / 复合功能库列表，每条可「跑一次」「编辑步骤」 |
 | `/plugins/thinking-space/edit?id=` | 改步骤：参数 JSON、上移/下移/删除、新增一步 |
 | `/plugins/thinking-space/settings` | 同一个设置页 |
+| `/plugins/thinking-space/local` | 本机能力：宿主提供什么工具接口、按插件分组的工具数、工具清单（中文名/插件/危险级/输出声明） |
 | `/plugins/thinking-space/export` | 导出全部技能为 JSON |
 
 ---
@@ -211,6 +212,14 @@ README.md                   本文件
 | `?flow=<id>&node=<节点id>` | 顺便选中某个节点 |
 
 画布和技能库的契约问题（端口声明、双向同步）见 [`docs/插件接入规范.md`](docs/插件接入规范.md)。
+
+---
+
+### 降级读取（旧宿主）
+
+工具目录优先用 `ctx.tools.catalog()`，它带插件归属、危险级、输出声明。宿主没有这个接口时，自动退回 `ctx.tools.list()`：工具名和描述能用，插件归属、危险级、输出声明拿不到，画布端口会标「未声明」。
+
+打开 `/plugins/thinking-space/local` 能直接看到这台机器走的是哪条路：顶部徽章写着 `catalog 可用` 或 `catalog 不可用`，清单里拿不到的字段显示「未声明」。都不可用时不报错，只是工具列表为空。
 
 ---
 
