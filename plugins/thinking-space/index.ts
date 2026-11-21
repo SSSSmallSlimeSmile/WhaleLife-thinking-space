@@ -682,6 +682,41 @@ function renderReceipt(result?: RunResult) {
   ${result.relevance ? `<p><span class="space-badge" ${result.relevance.status === "matched" ? "ok" : result.relevance.status === "weak" ? "warn" : result.relevance.status === "unrelated" ? "err" : ""}">相关性 ${escape(result.relevance.status)}</span><span class="space-muted">${escape(result.relevance.basis)}</span></p>` : ""}
   <ol class="space-steps">${steps}</ol></section>`;
 }
+/**
+ * 统一读取请求体：表单和 JSON 都认。
+ * 宿主表单提交发 application/x-www-form-urlencoded，程序调用多半发 application/json；
+ * 只认表单的话，JSON 调用会静默拿不到字段。
+ */
+type Payload = { get(key: string): string | null };
+async function readPayload(req: any, limit = 8192): Promise<Payload> {
+  const raw = await readBody(req, limit);
+  const type = String(req.headers?.["content-type"] ?? "").toLowerCase();
+  let parsed: Record<string, unknown> | null = null;
+  if (type.includes("application/json")) {
+    try {
+      const value = JSON.parse(raw || "{}");
+      if (value && typeof value === "object" && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+    } catch { parsed = null; }
+  } else if (!type && raw.trimStart().startsWith("{")) {
+    try {
+      const value = JSON.parse(raw);
+      if (value && typeof value === "object" && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+    } catch { parsed = null; }
+  }
+  if (!parsed) {
+    const form = new URLSearchParams(raw);
+    return { get: (key: string) => form.get(key) };
+  }
+  const body = parsed;
+  return {
+    get(key: string) {
+      const value = body[key];
+      if (value === undefined || value === null) return null;
+      return typeof value === "string" ? value : JSON.stringify(value);
+    },
+  };
+}
+
 function readBody(req: any, limit = 8192): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -2139,7 +2174,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       res.end();
     };
     try {
-      const form = new URLSearchParams(await readBody(req, 65536));
+      const form = await readPayload(req, 65536);
       id = (form.get("id") ?? "").trim();
       const store = await readStore();
       const skill = store.skills.find(item => item.id === id) as any;
@@ -2226,7 +2261,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
   ctx.web.api("/plugins/thinking-space/run", async (req: any, res: any) => {
     const back = pagePath + "space";
     try {
-      const form = new URLSearchParams(await readBody(req));
+      const form = await readPayload(req);
       const id = (form.get("id") ?? "").trim();
       const given: Record<string, unknown> = {};
       for (const [key, value] of form) if (key.startsWith("p:")) given[key.slice(2)] = value;
@@ -2246,7 +2281,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
   ctx.web.api("/plugins/thinking-space/delete", async (req: any, res: any) => {
     const back = pagePath + "space";
     try {
-      const form = new URLSearchParams(await readBody(req, 65536));
+      const form = await readPayload(req, 65536);
       const id = (form.get("id") ?? "").trim();
       if (!id) throw new Error("没有给出要删的技能。");
       const store = await readStore();
@@ -2267,7 +2302,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
   });
   ctx.web.api("/plugins/thinking-space/settings", async (req: any, res: any) => {
     try {
-      const form = new URLSearchParams(await readBody(req));
+      const form = await readPayload(req);
       const raw = Math.floor(Number(form.get("maxSteps")));
       const rawUrl = (form.get("spaceUrl") ?? "").trim();
       await ctx.config.save(settingsFile, {
@@ -2324,7 +2359,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
   });
   ctx.web.api("/plugins/thinking-space/import", async (req: any, res: any) => {
     try {
-      const form = new URLSearchParams(await readBody(req, 512 * 1024));
+      const form = await readPayload(req, 512 * 1024);
       const raw = (form.get("payload") ?? "").trim();
       if (!raw) throw new Error("没有内容可导入。");
       let parsed: any;
