@@ -1026,8 +1026,17 @@ function publishParamName(base,used){
   used.add(candidate);
   return candidate;
 }
+function guessOutputPath(tool){
+  const contract=tool?.contract||{};
+  const schema=contract.outputSchema;
+  const props=schema&&schema.properties?Object.keys(schema.properties):[];
+  if(props.length===1)return props[0];
+  const visible=Array.isArray(contract.visibleOutputs)?contract.visibleOutputs.filter(Boolean):[];
+  if(visible.length===1)return String(visible[0]);
+  return '';
+}
 function flowToSkillSpec(flow){
-  const problems=[],notes=[];
+  const problems=[],refs=[];
   const byId=new Map(flow.nodes.map(node=>[node.id,node]));
   const toolOf=node=>node?getTool(node.type):undefined;
   const steps=[];
@@ -1082,7 +1091,11 @@ function flowToSkillSpec(flow){
         continue;
       }
       values[field]='${'+from+'}';
-      notes.push('「'+tool.name+'」的 '+field+' 取的是「'+sourceTool.name+'」整段结果，不是某个字段；跑之前先确认那个工具吃得下整段结果。');
+      refs.push({
+        stepId:id,field,toolName:tool.name,
+        fromId:from,fromToolName:sourceTool?.name||from,
+        guess:guessOutputPath(sourceTool),
+      });
     }
     return {id,tool:tool.name,plugin:tool.plugin||'',params:values,next:null};
   });
@@ -1095,7 +1108,7 @@ function flowToSkillSpec(flow){
     kind:chainSteps.length>1?'composite':'single',
     params,steps:chainSteps,
   };
-  return {ok:problems.length===0,problems,notes,spec};
+  return {ok:problems.length===0,problems,refs,spec};
 }
 function publishFlowToSpace(flow){
   const plan=flowToSkillSpec(flow);
@@ -1103,15 +1116,36 @@ function publishFlowToSpace(flow){
     showDialog('发布到思维空间 · 先修这几处','<ul>'+plan.problems.map(item=>'<li>'+safe(item)+'</li>').join('')+'</ul><p class="muted">画布本身没动。改完再点一次「发布到思维空间」。</p><div class="actions">'+closeButton+'</div>');
     return;
   }
-  pendingPublish=plan.spec;
+  pendingPublish=plan;
   const rows=plan.spec.steps.map((step,index)=>'<li>'+(index+1)+'. '+safe(step.tool)+' · '+(Object.keys(step.params).length?safe(Object.keys(step.params).join('、')):'无参数')+'</li>').join('');
-  const notes=plan.notes.length?'<p>注意：</p><ul>'+plan.notes.map(item=>'<li>'+safe(item)+'</li>').join('')+'</ul>':'';
+  const refRows=plan.refs.length
+    ?'<p>下一步要把上游结果里的<strong>哪个字段</strong>交给下游。技能不能整段转发，这里必须写清楚：</p>'
+      +plan.refs.map((ref,index)=>'<p class="binding"><input data-ref-index="'+index+'" value="'+safe(ref.guess)+'" placeholder="如 data.results[0].url" style="min-width:260px"><span> ← 「'+safe(ref.fromToolName)+'」的字段，给「'+safe(ref.toolName)+'」的 '+safe(ref.field)+'</span></p>').join('')
+      +'<p class="muted" id="publish-ref-status" role="status"></p>'
+    :'';
   const paramLine=plan.spec.params.length?'<p>入口参数：'+safe(plan.spec.params.map(item=>item.name).join('、'))+'</p>':'';
-  showDialog('发布到思维空间','<p>技能名：'+safe(plan.spec.name)+'（'+(plan.spec.kind==='composite'?'复合功能':'独立功能')+'）</p><p>步骤 '+plan.spec.steps.length+' 步：</p><ol>'+rows+'</ol>'+paramLine+notes+'<p class="muted">同名技能会被覆盖，revision 加一。发布只写技能库，不改这个画布，也不动已有的技能。</p><div class="actions">'+closeButton+'<button type="button" class="primary" data-publish-confirm="1">确认发布</button></div>');
+  showDialog('发布到思维空间','<p>技能名：'+safe(plan.spec.name)+'（'+(plan.spec.kind==='composite'?'复合功能':'独立功能')+'）</p><p>步骤 '+plan.spec.steps.length+' 步：</p><ol>'+rows+'</ol>'+paramLine+refRows+'<p class="muted">同名技能会被覆盖，revision 加一。发布只写技能库，不改这个画布。字段路径就是宿主回执里的键，例如 data.text、data.results[0].url。</p><div class="actions">'+closeButton+'<button type="button" class="primary" data-publish-confirm="1">确认发布</button></div>');
 }
 async function confirmPublishToSpace(){
   if(!pendingPublish)return;
-  const spec=pendingPublish;
+  const plan=pendingPublish;
+  const spec=JSON.parse(JSON.stringify(plan.spec));
+  const inputs=[...dialog.querySelectorAll('[data-ref-index]')];
+  const status=dialog.querySelector('#publish-ref-status');
+  const bad=[];
+  for(const input of inputs){
+    const ref=plan.refs[Number(input.dataset.refIndex)];
+    if(!ref)continue;
+    const path=String(input.value||'').trim();
+    if(!path){bad.push('「'+ref.fromToolName+'」给「'+ref.field+'」的字段还没填');continue;}
+    if(!/^[\p{L}\p{N}_-]+(?:\.[\p{L}_][\p{L}\p{N}_-]*|\[\d+\])+$/u.test(path)){bad.push('字段路径写法不对：'+path+'（要写成 data.text 这样）');continue;}
+    const step=spec.steps.find(item=>item.id===ref.stepId);
+    if(step)step.params[ref.field]='${'+ref.fromId+'.'+path+'}';
+  }
+  if(bad.length){
+    if(status)status.textContent=bad.join('；');
+    return;
+  }
   const button=dialog.querySelector('[data-publish-confirm]');
   if(button){button.disabled=true;button.textContent='发布中…';}
   try{
@@ -1122,7 +1156,8 @@ async function confirmPublishToSpace(){
     showDialog('发布到思维空间','<p>已'+(data.created?'新建':'覆盖')+'：'+safe(data.id)+' · revision '+safe(String(data.revision))+'。</p><p>去 <a href="/plugins/thinking-space/space" target="_blank" rel="noopener">思维空间的技能列表</a> 看一眼，或者让助手用 space_run 跑一次。</p><div class="actions">'+closeButton+'</div>');
   }catch(error){
     if(button){button.disabled=false;button.textContent='确认发布';}
-    showDialog('发布到思维空间','<p>没发出去：'+safe(error instanceof Error?error.message:String(error))+'</p><p class="muted">技能库没变。改完画布再点一次发布。</p><div class="actions">'+closeButton+'</div>');
+    if(status)status.textContent='没发出去：'+String(error instanceof Error?error.message:error);
+    else showDialog('发布到思维空间','<p>没发出去：'+safe(error instanceof Error?error.message:String(error))+'</p><p class="muted">技能库没变。改完再点一次发布。</p><div class="actions">'+closeButton+'</div>');
   }
 }
 function renderFlowLibrary(compound){
