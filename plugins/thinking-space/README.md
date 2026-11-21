@@ -35,7 +35,7 @@ WhaleLife 插件。把「一串工具调用」存成一条可复用的技能，�
 ```
 plugins/thinking-space/
   index.ts
-  plugin.yaml          depends: [web, tools]
+  plugin.yaml          depends: [web, tools, models]
   README.md
   LICENSE  LICENSE-ADDITIONAL  NOTICE.md  THIRD_PARTY_NOTICES.md
   data/settings.example.json
@@ -208,7 +208,7 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 ---
 
-## 九、已知限制
+## 九、已知限制与兼容性
 
 **一、页面只能验 HTML，验不了排版。** 我没法看浏览器，只能确认接口返回的元素在不在。
 
@@ -230,7 +230,13 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 ---
 
-## 十、许可
+**十、宿主版本要求。** 本插件在 2026-11-20 前后的宿主版本上开发，用到了 `ctx.tools.catalog()` 的 `outputSchema`、`ctx.web.page` 的 `navigation` 选项、`ctx.models` 依赖。更老的宿主可能缺这些字段，表现为：端口推不出、导航不出现、模型选择为空。缺字段时插件降级而不是崩，但功能会少一块。
+
+**十一、工具中文名是本机词典。** `TOOL_LABELS` 里那 50 条是开发机上装过的工具。别人装上后，自己插件里的工具会显示英文名（如 `my_tool`），功能不受影响，只是技能名、端口名读起来是英文。想中文化就往词典里加。
+
+**十二、触发语里的名字要改。** 设置里 `triggerPhrase` 默认「XXX，学会这个技能了吗？」，XXX 是占位符，装上后改成你自己的人格名。
+
+## 十三、许可
 
 AGPL-3.0。上游附加条款原文与 NOTICE 在包内。
 
