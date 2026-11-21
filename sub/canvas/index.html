@@ -1015,6 +1015,116 @@ function flowPurposes(flow,seen=new Set()){
   }
   return [...groups];
 }
+const publishNonToolIds=new Set(['message','input_text','qq_group_input','reply','ticket','qq_group_output','display_text','display_image_placeholder','result_note','kan_prompt','kan_compose','archive_preview']);
+let pendingPublish=null;
+function publishParamName(base,used){
+  let name=String(base||'entry').replace(/[^\p{L}\p{N}_-]/gu,'_');
+  if(!/^[\p{L}_][\p{L}\p{N}_-]{0,63}$/u.test(name))name='entry';
+  if(['__proto__','constructor','prototype'].includes(name))name='entry';
+  let candidate=name,n=2;
+  while(used.has(candidate)){candidate=name+n;n+=1;}
+  used.add(candidate);
+  return candidate;
+}
+function flowToSkillSpec(flow){
+  const problems=[],notes=[];
+  const byId=new Map(flow.nodes.map(node=>[node.id,node]));
+  const toolOf=node=>node?getTool(node.type):undefined;
+  const steps=[];
+  for(const node of flow.nodes){
+    const tool=toolOf(node);
+    if(!tool){problems.push('节点「'+node.id+'」的类型 '+node.type+' 找不到对应工具。');continue;}
+    if(publishNonToolIds.has(tool.id))continue;
+    if(typeof node.type==='string'&&node.type.startsWith('function:')){
+      problems.push('「'+tool.name+'」是引用的画布；技能里只装真正要调的工具，把它里面的工具节点搬过来再发布。');continue;
+    }
+    if(tool.dynamic!==true){
+      problems.push('「'+tool.name+'」不在宿主工具目录里。先点工具栏的「同步插件库」，确认这个工具真的装着。');continue;
+    }
+    steps.push(node);
+  }
+  if(!steps.length)problems.push('这个画布里没有能发布成工具步骤的节点。');
+  const stepIds=new Set(steps.map(node=>node.id));
+  const edges=(Array.isArray(flow.edges)?flow.edges:[]).filter(edge=>Array.isArray(edge)&&stepIds.has(edge[0])&&stepIds.has(edge[1]));
+  const incoming=new Map(),outgoing=new Map();
+  for(const [from,to] of edges){
+    if(!(incoming.get(to)||[]).includes(from))incoming.set(to,[...(incoming.get(to)||[]),from]);
+    if(!(outgoing.get(from)||[]).includes(to))outgoing.set(from,[...(outgoing.get(from)||[]),to]);
+  }
+  for(const node of steps){
+    const name=toolOf(node)?.name||node.id;
+    if((incoming.get(node.id)||[]).length>1)problems.push('「'+name+'」上游接了多个节点，技能是一条链，接不了。');
+    if((outgoing.get(node.id)||[]).length>1)problems.push('「'+name+'」后面接了多个节点，技能是一条链，接不了。');
+  }
+  const roots=steps.filter(node=>!(incoming.get(node.id)||[]).length);
+  if(roots.length>1)problems.push('画布上有 '+roots.length+' 条各走各的链，技能只认一条。');
+  const chain=[];
+  if(roots.length===1){
+    let cursor=roots[0].id,guard=0;
+    while(cursor&&guard<steps.length+1){chain.push(cursor);cursor=(outgoing.get(cursor)||[])[0];guard+=1;}
+  }
+  if(chain.length&&chain.length!==steps.length)problems.push('有 '+(steps.length-chain.length)+' 个节点没接在这条链上。');
+  const params=[],used=new Set();
+  const chainSteps=chain.map(id=>{
+    const node=byId.get(id),tool=toolOf(node),values={};
+    for(const [key,value] of Object.entries(node.params||{})){
+      if(typeof value==='string'&&value.trim().startsWith('$'))continue;
+      if(value===undefined||value===null||value==='')continue;
+      values[key]=value;
+    }
+    for(const [from,to,field] of edges){
+      if(to!==id||!field)continue;
+      const source=byId.get(from),sourceTool=toolOf(source);
+      if(publishNonToolIds.has(sourceTool?.id)){
+        const name=publishParamName(field,used);
+        params.push({name,type:'string',required:true,label:String(field).slice(0,20)});
+        values[field]='${'+name+'}';
+        continue;
+      }
+      values[field]='${'+from+'}';
+      notes.push('「'+tool.name+'」的 '+field+' 取的是「'+sourceTool.name+'」整段结果，不是某个字段；跑之前先确认那个工具吃得下整段结果。');
+    }
+    return {id,tool:tool.name,plugin:tool.plugin||'',params:values,next:null};
+  });
+  for(let index=0;index<chainSteps.length;index+=1)chainSteps[index].next=index+1<chainSteps.length?chainSteps[index+1].id:null;
+  const skillId=String(flow.id||'').replace(/[^a-zA-Z0-9_-]/g,'-').slice(0,64)||'canvas-skill';
+  const spec={
+    schemaVersion:1,id:skillId,
+    name:String(flow.name||skillId).slice(0,80),
+    description:String(flow.note||('从画布发布：'+flow.name)).slice(0,500),
+    kind:chainSteps.length>1?'composite':'single',
+    params,steps:chainSteps,
+  };
+  return {ok:problems.length===0,problems,notes,spec};
+}
+function publishFlowToSpace(flow){
+  const plan=flowToSkillSpec(flow);
+  if(!plan.ok){
+    showDialog('发布到思维空间 · 先修这几处','<ul>'+plan.problems.map(item=>'<li>'+safe(item)+'</li>').join('')+'</ul><p class="muted">画布本身没动。改完再点一次「发布到思维空间」。</p><div class="actions">'+closeButton+'</div>');
+    return;
+  }
+  pendingPublish=plan.spec;
+  const rows=plan.spec.steps.map((step,index)=>'<li>'+(index+1)+'. '+safe(step.tool)+' · '+(Object.keys(step.params).length?safe(Object.keys(step.params).join('、')):'无参数')+'</li>').join('');
+  const notes=plan.notes.length?'<p>注意：</p><ul>'+plan.notes.map(item=>'<li>'+safe(item)+'</li>').join('')+'</ul>':'';
+  const paramLine=plan.spec.params.length?'<p>入口参数：'+safe(plan.spec.params.map(item=>item.name).join('、'))+'</p>':'';
+  showDialog('发布到思维空间','<p>技能名：'+safe(plan.spec.name)+'（'+(plan.spec.kind==='composite'?'复合功能':'独立功能')+'）</p><p>步骤 '+plan.spec.steps.length+' 步：</p><ol>'+rows+'</ol>'+paramLine+notes+'<p class="muted">同名技能会被覆盖，revision 加一。发布只写技能库，不改这个画布，也不动已有的技能。</p><div class="actions">'+closeButton+'<button type="button" class="primary" data-publish-confirm="1">确认发布</button></div>');
+}
+async function confirmPublishToSpace(){
+  if(!pendingPublish)return;
+  const spec=pendingPublish;
+  const button=dialog.querySelector('[data-publish-confirm]');
+  if(button){button.disabled=true;button.textContent='发布中…';}
+  try{
+    const res=await fetch('/plugins/thinking-space/publish',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({skill:spec})});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok||data.ok!==true)throw new Error(data.error||('宿主返回 HTTP '+res.status));
+    pendingPublish=null;
+    showDialog('发布到思维空间','<p>已'+(data.created?'新建':'覆盖')+'：'+safe(data.id)+' · revision '+safe(String(data.revision))+'。</p><p>去 <a href="/plugins/thinking-space/space" target="_blank" rel="noopener">思维空间的技能列表</a> 看一眼，或者让助手用 space_run 跑一次。</p><div class="actions">'+closeButton+'</div>');
+  }catch(error){
+    if(button){button.disabled=false;button.textContent='确认发布';}
+    showDialog('发布到思维空间','<p>没发出去：'+safe(error instanceof Error?error.message:String(error))+'</p><p class="muted">技能库没变。改完画布再点一次发布。</p><div class="actions">'+closeButton+'</div>');
+  }
+}
 function renderFlowLibrary(compound){
   const title=compound?'复合功能库':'功能库';
   const kind=compound?'compound':'function';
@@ -1023,7 +1133,7 @@ function renderFlowLibrary(compound){
   main.innerHTML=`<section class="library">
     <div class="toolbar"><h1>${title}</h1><button class="primary" data-action="${compound?'new-compound':'new-function'}">${compound?'新建复合功能':'新建独立功能'}</button></div>
     <div class="filters" style="margin-top:18px"><select id="library-purpose" aria-label="按用途筛选功能">${optionsHtml(purposeOptions,purpose)}</select></div>
-    <div class="cards">${entries.map(flow=>`<article class="card flow-card" data-node-kind="${compound?"compound":"function"}"><strong>${flow.catalogCode?safe(flow.catalogCode)+" · ":""}${safe(flow.name)}</strong><small>${flow.nodes.length} 个节点${flow.sourceStatus?" · "+safe(flow.sourceStatus):""}</small>${toolPortSummary(functionTool(flow.id))}${flow.note?`<p>${safe(flow.note)}</p>`:""}<div><button data-flow-run="${safe(flow.id)}">运行</button> <button data-open="${safe(flow.id)}">打开画布</button> <span class="flow-more"><button type="button" data-flow-menu="${safe(flow.id)}" title="更多操作">⋯</button><span class="flow-menu" hidden><button type="button" data-delete-flow="${safe(flow.id)}" class="delete-flow">删除这个功能</button></span></span></div></article>`).join('')||'<p class="muted">没有符合当前用途的功能。</p>'}</div>
+    <div class="cards">${entries.map(flow=>`<article class="card flow-card" data-node-kind="${compound?"compound":"function"}"><strong>${flow.catalogCode?safe(flow.catalogCode)+" · ":""}${safe(flow.name)}</strong><small>${flow.nodes.length} 个节点${flow.sourceStatus?" · "+safe(flow.sourceStatus):""}</small>${toolPortSummary(functionTool(flow.id))}${flow.note?`<p>${safe(flow.note)}</p>`:""}<div><button data-flow-run="${safe(flow.id)}">运行</button> <button data-flow-publish="${safe(flow.id)}">发布到思维空间</button> <button data-open="${safe(flow.id)}">打开画布</button> <span class="flow-more"><button type="button" data-flow-menu="${safe(flow.id)}" title="更多操作">⋯</button><span class="flow-menu" hidden><button type="button" data-delete-flow="${safe(flow.id)}" class="delete-flow">删除这个功能</button></span></span></div></article>`).join('')||'<p class="muted">没有符合当前用途的功能。</p>'}</div>
   </section>`;
   main.querySelector('#library-purpose').onchange=event=>{
     libraryPurposes[kind]=event.target.value;
@@ -2010,11 +2120,78 @@ function updateProjectStatus(){
   const status=clean?'已保存 '+new Date(savedProjectSnapshot.savedAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'未保存';
   button.textContent='思维保存 · '+status;
 }
-let serverSyncTimer=null;
+let serverSeenAt=null,remoteConflict=null,serverSyncTimer=null;
+function canvasIsClean(){
+  const saved=savedProjectSnapshot?.project;
+  return !!saved&&JSON.stringify([saved.tools,saved.flows,saved.workflowRevisions,saved.catalogMode])===JSON.stringify([tools,flows,workflowRevisions,catalogMode]);
+}
+function localSnapshotAt(){
+  try{return JSON.parse(localStorage.getItem(projectSnapshotKey)||'null')?.savedAt||'';}catch{return '';}
+}
+function clearRemoteBanner(){
+  const el=document.querySelector('#remote-update-banner');
+  if(el)el.remove();
+}
+function adoptServerSnapshot(snapshot){
+  if(!snapshot||!snapshot.project||!Array.isArray(snapshot.project.flows))return false;
+  try{
+    localStorage.setItem(projectSnapshotKey,JSON.stringify(snapshot));
+    localStorage.setItem(key,JSON.stringify(snapshot.project));
+  }catch{return false;}
+  location.reload();
+  return true;
+}
+function showRemoteBanner(snapshot,at){
+  clearRemoteBanner();
+  const bar=document.createElement('div');
+  bar.id='remote-update-banner';
+  bar.setAttribute('role','status');
+  bar.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:99;display:flex;gap:10px;align-items:center;flex-wrap:wrap;max-width:min(760px,92vw);padding:10px 14px;border-radius:10px;background:#1f2430;color:#f3f4f6;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.28)';
+  const text=document.createElement('span');
+  text.textContent='思维空间那边更新了画布快照（'+new Date(at).toLocaleTimeString('zh-CN')+'），这边还有没保存的改动。';
+  const load=document.createElement('button');
+  load.type='button';load.textContent='载入服务端版本';
+  load.onclick=()=>{clearRemoteBanner();remoteConflict=null;adoptServerSnapshot(snapshot);};
+  const keep=document.createElement('button');
+  keep.type='button';keep.textContent='保留本地，下次保存覆盖';
+  keep.style.cssText='background:#3b4252;color:#fff;border:0;padding:6px 10px;border-radius:6px;cursor:pointer';
+  keep.onclick=()=>{clearRemoteBanner();remoteConflict=null;};
+  bar.appendChild(text);bar.appendChild(load);bar.appendChild(keep);
+  document.body.appendChild(bar);
+}
+async function pollServerSnapshot(){
+  if(document.hidden)return;
+  let data=null;
+  try{
+    const res=await fetch('/plugins/thinking-space/flows?t='+Date.now(),{credentials:'same-origin',cache:'no-store'});
+    if(!res.ok)return;
+    data=await res.json();
+  }catch{return;}
+  if(!data||data.ok!==true)return;
+  const at=typeof data.savedAt==='string'?data.savedAt:'';
+  if(!at)return;
+  if(serverSeenAt===null){serverSeenAt=at;return;}
+  if(at===serverSeenAt)return;
+  serverSeenAt=at;
+  const mine=localSnapshotAt();
+  if(mine&&at<=mine)return; /* 这就是我们自己刚存上去的那份 */
+  if(canvasIsClean()){
+    if(!adoptServerSnapshot(data.snapshot))console.info('服务端有新快照，但读不出 project，保持当前画布。');
+    return;
+  }
+  remoteConflict={at,snapshot:data.snapshot};
+  showRemoteBanner(data.snapshot,at);
+}
+setInterval(()=>{void pollServerSnapshot();},10000);
 function scheduleServerSync(){
   if(serverSyncTimer)clearTimeout(serverSyncTimer);
   serverSyncTimer=setTimeout(()=>{
     serverSyncTimer=null;
+    if(remoteConflict){
+      const el=document.querySelector('#project-save-feedback');
+      if(el)el.textContent='服务端有更新，先选载入还是保留本地';
+      return;
+    }
     try{
       const snapshot={schemaVersion:1,kind:'whalelife-project',savedAt:new Date().toISOString(),project:projectState()};
       syncProjectToServer(snapshot);
@@ -2194,7 +2371,7 @@ function renderEditor(){
   }
   const width=Math.max(880,...flow.nodes.map(node=>node.x+230));
   const height=Math.max(440,...flow.nodes.map(node=>node.y+190));
-  main.innerHTML=`<div class="toolbar flow-toolbar"><h1 title="${safe(flow.name)}">${safe(flow.name)}</h1><span class="flow-kind" data-node-kind="${flow.compound?"compound":"function"}" title="${safe(flow.note||"")}">${flow.catalogCode?safe(flow.catalogCode)+" · ":""}${flow.compound?"复合功能":"独立功能"}</span><div class="flow-actions">${view.returnTo?'<button data-action="return-canvas">返回上级画布</button>':''}${zoomControls(view)}<button data-action="undo-canvas" title="Ctrl+Z" ${view.history?.length?"":"disabled"}>撤销</button><button data-action="redo-canvas" title="Ctrl+Shift+Z" ${view.future?.length?"":"disabled"}>重做</button><button data-action="clean-idle-nodes" title="清理没有任何连线的节点">清理空闲节点</button><button data-action="delete-selection" class="delete-selection" hidden>删除</button>${flow.demo?scenarioControls(flow,view):""}<button data-action="drawer" aria-expanded="${view.palette!==false}">节点栏</button><button data-action="save-canvas">保存画布</button><button data-flow-run="${flow.id}">运行表单</button><button data-action="show-wish" class="wish-launch-button" aria-expanded="${view.panel==="wish"}">聊聊${wishUnread?" ("+wishUnread+")":""}</button><button class="primary" data-action="run" ${view.running?"disabled":""}>${view.running?"模拟运行中…":"试跑"}</button></div>${chatRunPreview(flow,view)}</div><div class="editor">${view.palette===false?"":paletteMarkup(flow)+panelSplitter("palette","调整节点栏宽度")}<div class="viewport" data-flow="${flow.id}"><div class="board" data-zoom="${view.zoom||1}" style="zoom:${view.zoom||1};min-width:max(${width}px, calc(100% + 360px));min-height:max(${height}px, calc(100% + 240px))"><canvas aria-hidden="true"></canvas>${flow.nodes.map(node=>nodeMarkup(node,view)).join('')}</div><div class="status" role="status">${safe(view.status||'点击节点或连线选中 · 拖动空白处平移画布')}</div></div>${view.panel?panelSplitter("side","调整右侧栏宽度")+'<aside class="side"></aside>':''}</div>`;
+  main.innerHTML=`<div class="toolbar flow-toolbar"><h1 title="${safe(flow.name)}">${safe(flow.name)}</h1><span class="flow-kind" data-node-kind="${flow.compound?"compound":"function"}" title="${safe(flow.note||"")}">${flow.catalogCode?safe(flow.catalogCode)+" · ":""}${flow.compound?"复合功能":"独立功能"}</span><div class="flow-actions">${view.returnTo?'<button data-action="return-canvas">返回上级画布</button>':''}${zoomControls(view)}<button data-action="undo-canvas" title="Ctrl+Z" ${view.history?.length?"":"disabled"}>撤销</button><button data-action="redo-canvas" title="Ctrl+Shift+Z" ${view.future?.length?"":"disabled"}>重做</button><button data-action="clean-idle-nodes" title="清理没有任何连线的节点">清理空闲节点</button><button data-action="delete-selection" class="delete-selection" hidden>删除</button>${flow.demo?scenarioControls(flow,view):""}<button data-action="drawer" aria-expanded="${view.palette!==false}">节点栏</button><button data-action="save-canvas">保存画布</button><button data-flow-publish="${safe(flow.id)}">发布到思维空间</button><button data-flow-run="${flow.id}">运行表单</button><button data-action="show-wish" class="wish-launch-button" aria-expanded="${view.panel==="wish"}">聊聊${wishUnread?" ("+wishUnread+")":""}</button><button class="primary" data-action="run" ${view.running?"disabled":""}>${view.running?"模拟运行中…":"试跑"}</button></div>${chatRunPreview(flow,view)}</div><div class="editor">${view.palette===false?"":paletteMarkup(flow)+panelSplitter("palette","调整节点栏宽度")}<div class="viewport" data-flow="${flow.id}"><div class="board" data-zoom="${view.zoom||1}" style="zoom:${view.zoom||1};min-width:max(${width}px, calc(100% + 360px));min-height:max(${height}px, calc(100% + 240px))"><canvas aria-hidden="true"></canvas>${flow.nodes.map(node=>nodeMarkup(node,view)).join('')}</div><div class="status" role="status">${safe(view.status||'点击节点或连线选中 · 拖动空白处平移画布')}</div></div>${view.panel?panelSplitter("side","调整右侧栏宽度")+'<aside class="side"></aside>':''}</div>`;
   const viewport=main.querySelector('.viewport');
   viewport.scrollLeft=view.x||0; viewport.scrollTop=view.y||0;
   viewport.onscroll=()=>{view.x=viewport.scrollLeft;view.y=viewport.scrollTop;};
@@ -2713,6 +2890,8 @@ document.addEventListener('click',event=>{
   }
   document.querySelectorAll('.flow-menu').forEach(item=>{item.hidden=true});
   if(button.dataset.flowRun){const target=flows.find(item=>item.id===button.dataset.flowRun);if(target)showRunForm(target);return;}
+  if(button.dataset.flowPublish){const target=flows.find(item=>item.id===button.dataset.flowPublish);if(target)publishFlowToSpace(target);return;}
+  if(button.dataset.publishConfirm){void confirmPublishToSpace();return;}
   if(button.dataset.formConfig){const target=flows.find(item=>item.id===button.dataset.formConfig);if(target)configureRunForm(target);return;}
   if(button.dataset.deleteFlow){askDeleteFlow(button.dataset.deleteFlow);return;}
   if(button.dataset.confirmDeleteFlow){if(deleteFlowById(button.dataset.confirmDeleteFlow)){if(dialog.open)dialog.close();persist();render();}return;}
@@ -3447,19 +3626,49 @@ async function wishAgent(text,kind,onChunk){
   void refreshRobotIdentity();
   return new Promise((resolve,reject)=>{
     const socket=new WebSocket(location.origin.replace(/^http/,'ws')+'/ws/chat');
-    let reply='',settled=false;
-    const finish=(error)=>{if(settled)return;settled=true;clearTimeout(timeout);socket.close();if(error)reject(error);else resolve(reply);};
-    const timeout=setTimeout(()=>finish(new Error('等待助手回复超时。')),180000);
+    let reply='',settled=false,lastAt=Date.now(),probing=false,misses=0;
+    const IDLE_PROBE_MS=20000,TOTAL_LIMIT_MS=30*60*1000;
+    let probeTimer=null,totalTimer=null;
+    const stopTimers=()=>{if(probeTimer)clearInterval(probeTimer);if(totalTimer)clearTimeout(totalTimer);};
+    const finish=(error)=>{if(settled)return;settled=true;stopTimers();try{socket.close();}catch{}if(error)reject(error);else resolve(reply);};
+    // 等的时候只探活，不掐断：宿主跑长工具时可能几分钟没有新内容，那不算断线。
+    const probeHost=async()=>{
+      try{
+        const response=await fetch('/api/status?t='+Date.now(),{credentials:'same-origin',cache:'no-store'});
+        return response.ok;
+      }catch{return false;}
+    };
+    const probe=async()=>{
+      if(settled||probing)return;
+      if(Date.now()-lastAt<IDLE_PROBE_MS)return;
+      probing=true;
+      const alive=await probeHost();
+      probing=false;
+      if(settled)return;
+      misses=alive?0:misses+1;
+      if(misses>=2)finish(new Error('宿主连续两次没应答，先断开。任务可能还在宿主那边跑，结果以插件回执为准。'));
+    };
+    probeTimer=setInterval(()=>{void probe();},IDLE_PROBE_MS);
+    totalTimer=setTimeout(()=>finish(new Error('等了 30 分钟还没结束，先断开。宿主那边的任务可能还在跑，画布可以稍后重试。')),TOTAL_LIMIT_MS);
     socket.onopen=()=>socket.send(JSON.stringify({session:session.id,expectedSession:session.id,text:wishInstruction(text,kind)}));
     socket.onmessage=event=>{
       let data;
       try{data=JSON.parse(event.data);}catch{return;}
+      lastAt=Date.now();misses=0;
       if(data.type==='chunk'&&typeof data.text==='string'){reply+=data.text;onChunk(reply);}
       else if(data.type==='context'&&data.personaName)updateRobotHeading(data.personaName);
       else if(data.type==='done')finish();
       else if(data.type==='error')finish(new Error(data.error||'助手回复失败。'));
     };
-    socket.onerror=socket.onclose=()=>finish(new Error('与 WhaleLife 的连接中断，请检查宿主是否在线。'));
+    socket.onclose=async()=>{
+      if(settled)return;
+      const alive=await probeHost();
+      if(settled)return;
+      finish(new Error(alive
+        ?'连接被关了，但宿主还应答着：可能是别的窗口在聊，或者插件刚重载过。可以再发一次。'
+        :'连接断了，宿主也没应答。先查 WhaleLife 是不是停了。'));
+    };
+    socket.onerror=()=>{};
   });
 }
 function richLinkify(text){

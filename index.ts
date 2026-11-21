@@ -756,8 +756,6 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
       <li><strong>先跑一次再存下来</strong>：没跑通的链留在库里只会让下次调用踩空。</li>
     </ol>
   </div>
-  <p class="space-row" style="margin-top:16px"><a class="space-open" href="${escape(settings.spaceUrl)}" target="_blank" rel="noopener">打开思维空间 →</a></p>
-  <p class="space-muted" style="margin-top:8px">当前地址 ${escape(settings.spaceUrl)}</p>
 </section>
 <section class="space-panel">
   <h2>当前状态</h2>
@@ -2376,6 +2374,25 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       const savedAt = typeof (snapshot as any).savedAt === "string" ? (snapshot as any).savedAt : new Date().toISOString();
       await ctx.config.save(flowsFile, { savedAt, snapshot });
       return json(200, { ok: true, savedAt, bytes: Buffer.byteLength(raw, "utf8") });
+    } catch (error) {
+      return json(400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  ctx.web.api("/plugins/thinking-space/publish", async (req: any, res: any) => {
+    const json = (status: number, body: unknown) => {
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    try {
+      if (String(req.method ?? "GET").toUpperCase() !== "POST") return json(405, { ok: false, error: "只支持 POST。" });
+      const raw = await readBody(req, 256 * 1024);
+      const parsed = JSON.parse(raw || "{}");
+      const spec = parsed?.skill;
+      if (!record(spec) || typeof (spec as any).id !== "string") throw new Error("缺少 skill 或 skill.id。");
+      const result = await save((spec as any).id, spec);
+      if (result.status !== "ok") return json(422, { ok: false, error: result.error ?? "技能没有保存。" });
+      return json(200, { ok: true, id: result.id, created: result.created === true, revision: result.revision });
     } catch (error) {
       return json(400, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
