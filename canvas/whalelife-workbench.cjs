@@ -15,7 +15,7 @@ const host = '127.0.0.1';
 const origin = `http://${host}:${port}`;
 const targetOrigin = `http://${host}:${upstream}`;
 const identityRoute = 'GET /api/workbench/identity';
-const allowedRoutes = new Set(['POST /api/login', 'GET /api/session/current', 'POST /plugins/workbench-readonly/search-read', identityRoute, 'GET /api/session', 'GET /api/official-plugins', 'POST /api/official-plugins/apply', 'GET /api/community-plugins', 'POST /api/community-plugins/apply', 'GET /plugins/thinking-space/flows', 'POST /plugins/thinking-space/flows', 'GET /plugins/thinking-space/skill', 'GET /plugins/thinking-space/tools']);
+const allowedRoutes = new Set(['POST /api/login', 'GET /api/status', 'GET /api/session/current', 'POST /plugins/workbench-readonly/search-read', identityRoute, 'GET /api/session', 'GET /api/official-plugins', 'POST /api/official-plugins/apply', 'GET /api/community-plugins', 'POST /api/community-plugins/apply', 'GET /plugins/thinking-space/flows', 'POST /plugins/thinking-space/flows', 'GET /plugins/thinking-space/skill', 'GET /plugins/thinking-space/tools']);
 function localHost(req) {
   return req.headers.host === `${host}:${port}`;
 }

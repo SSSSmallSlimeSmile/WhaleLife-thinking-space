@@ -4,8 +4,8 @@
  */
 import type { Context, ToolContract } from "whalelife";
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 const storeFile = "skills.json";
 const settingsFile = "settings.json";
@@ -2082,6 +2082,38 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
     const result = await ps(`(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue).CommandLine`);
     return result.out.trim();
   }
+  // 画布要连的是"我这个宿主"的端口，不是脚本里写死的默认值。
+  // 宿主根目录下 config/config.json 的 web.port 才是准的；读不到就退回脚本自己的默认。
+  function locateUpstream(): { root: string; port: number } | null {
+    // process.cwd() 不一定是宿主根；宿主进程的启动参数里通常带着根目录，一并试。
+    const argRoots = process.argv
+      .filter((item) => /^[A-Za-z]:[\\/]/.test(item) && !/\.[A-Za-z0-9]{1,6}$/.test(item))
+      .map((item) => resolve(item));
+    const bases = [
+      ...argRoots,
+      process.cwd(),
+      resolve(process.cwd(), ".."),
+      resolve(process.cwd(), "..", ".."),
+    ];
+    for (const base of bases) {
+      const configFile = join(base, "config", "config.json");
+      if (!existsSync(configFile)) continue;
+      try {
+        const raw = JSON.parse(readFileSync(configFile, "utf8"));
+        const port = Math.floor(Number(raw?.web?.port));
+        if (Number.isInteger(port) && port > 0 && port <= 65535 && port !== canvasPort) return { root: base, port };
+      } catch { /* 读不动就换下一个候选 */ }
+    }
+    return null;
+  }
+  function locateCanvasScript(located: { root: string } | null): string {
+    const bases = located ? [located.root, process.cwd()] : [process.cwd(), resolve(process.cwd(), "..")];
+    for (const base of bases) {
+      const scriptFile = join(base, "plugins", "thinking-space", "canvas", "whalelife-workbench.cjs");
+      if (existsSync(scriptFile)) return scriptFile;
+    }
+    return "";
+  }
   async function canvasState(): Promise<CanvasState> {
     const pid = await canvasPid();
     return pid ? { pid } : { pid: null, ...(canvasError ? { error: canvasError } : {}) };
@@ -2089,11 +2121,14 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
   async function startCanvas(): Promise<string> {
     const running = await canvasPid();
     if (running) { canvasHostPid = running; canvasError = undefined; return `画布已经在跑了（PID ${running}）。`; }
-    const script = (await readSettings()).canvasScript;
+    const located = locateUpstream();
+    const configured = (await readSettings()).canvasScript;
+    const script = configured || locateCanvasScript(located);
     if (!script) { canvasError = "还没配置画布脚本路径：设置页 → 画布服务 → 画布脚本路径，填完整路径。"; return canvasError; }
     if (!existsSync(script)) { canvasError = `找不到脚本：${script}`; return canvasError; }
     try {
-      const child = spawn(process.execPath, [script], { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
+      const args = located ? [script, "--upstream", String(located.port)] : [script];
+      const child = spawn(process.execPath, args, { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
       child.unref();
       canvasHostPid = child.pid ?? null;
       const ownerPid = canvasHostPid;

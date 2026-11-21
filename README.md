@@ -44,7 +44,7 @@ node install.mjs --host "K:\WhaleLife\whalelife"
 它做四件事：
 
 ```
-下载 thinking-space-0.1.0.wlpkg.gz
+下载 thinking-space-0.1.3.wlpkg.gz
 逐文件比对 sha256（不一致就停，不写半个文件）
 释放到 <宿主>/plugins/thinking-space
 写 data/install.json 记录版本、来源、包摘要
