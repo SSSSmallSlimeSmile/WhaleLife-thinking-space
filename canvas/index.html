@@ -543,12 +543,24 @@ async function syncPluginLibrary(options){
   for(const [id,tool] of Object.entries(whaleTools)){
     if(tool&&tool.dynamic&&!names.has(id)){delete whaleTools[id];removed++;}
   }
-  if(!silent){contractOnlyEntries.clear();library.hostOnly=true;library.mode='all';library.filter='';}
   dynamicToolCount=Object.values(whaleTools).filter(tool=>tool&&tool.dynamic).length;
+  let flowReport=null;
+  if(!silent){
+    contractOnlyEntries.clear();library.hostOnly=true;library.mode='all';library.filter='';
+    flowReport=await syncFlowsFromHost({silent:true});
+  }
   try{render();}catch(error){}
   if(silent)return {total:names.size,added,updated,removed};
-  showDialog('同步插件库',`<p>宿主现在报 ${names.size} 个工具。</p><p>新增 ${added} · 更新 ${updated} · 移除 ${removed}</p><p class="muted">工具库现在只列宿主报上来的这些：插件没装的、页面内置的示例和旧的静态清单条目都不再显示。插件本身和画布上已摆好的节点没动。想找回来，点工具栏的「恢复内置清单」，或者刷新页面。</p><div class="actions">${closeButton}</div>`);
-  return {total:names.size,added,updated,removed};
+  let flowLine='';
+  if(flowReport&&flowReport.ok&&flowReport.source==='host'){
+    flowLine=`<p>功能库与复合功能库：按宿主快照同步 ${flowReport.count} 条（功能 ${flowReport.functionCount} · 复合 ${flowReport.compoundCount}）。</p>`;
+  }else if(flowReport&&flowReport.ok){
+    flowLine=`<p>功能库与复合功能库：宿主没有画布快照，只留 ${flowReport.count} 条内置示例（功能 ${flowReport.functionCount} · 复合 ${flowReport.compoundCount}）。</p>`;
+  }else if(flowReport){
+    flowLine=`<p>功能库与复合功能库：没读成（${safe(String(flowReport.message||'未知原因'))}），保持当前画布。</p>`;
+  }
+  showDialog('同步插件库',`<p>宿主现在报 ${names.size} 个工具。</p><p>新增 ${added} · 更新 ${updated} · 移除 ${removed}</p>${flowLine}<p class="muted">工具库现在只列宿主报上来的这些：插件没装的、页面内置的示例和旧的静态清单条目都不再显示。功能库和复合功能库跟着宿主重读了，点之前那份画布留在浏览器里（键 robot-workbench-local-backup）。插件本身和画布上已摆好的节点没动。想找回来，点工具栏的「恢复内置清单」，或者刷新页面。</p><div class="actions">${closeButton}</div>`);
+  return {total:names.size,added,updated,removed,flows:flowReport};
 }
 (function loadDynamicTools(){ void syncPluginLibrary({silent:true}); })();
 let catalogMode=['off','required','rename'].includes(saved?.catalogMode)?saved.catalogMode:'ready';
@@ -3777,33 +3789,46 @@ document.querySelector('#project-import-file')?.addEventListener('change',async 
   catch{showDialog('无法导入工程','<p>请选择有效的 JSON 工程文件。</p>'+closeButton);}
 });
 updateProjectStatus();
-async function syncFlowsFromHost(){
+async function syncFlowsFromHost(options){
   // 功能库和复合功能库只认宿主：宿主有画布快照就整份接管，没有就只留内置示例。
+  const silent=!!(options&&options.silent);
   let host=null;
   try{
-    const res=await fetch('/plugins/thinking-space/flows',{credentials:'same-origin'});
-    if(res.ok)host=await res.json();
-  }catch(e){console.warn('画布：读宿主快照失败，'+e.message);return;}
+    const res=await fetch('/plugins/thinking-space/flows?t='+Date.now(),{credentials:'same-origin',cache:'no-store'});
+    if(!res.ok)throw new Error('宿主返回 HTTP '+res.status);
+    host=await res.json();
+  }catch(e){
+    console.warn('画布：读宿主快照失败，'+e.message);
+    return {ok:false,source:'none',count:0,functionCount:0,compoundCount:0,message:e.message||String(e)};
+  }
   const snap=host&&host.ok?host.snapshot:null;
   const next=snap&&snap.project&&Array.isArray(snap.project.flows)?snap.project.flows:[];
   try{
     const prev=localStorage.getItem('robot-workbench-prototype-v4');
     if(prev)localStorage.setItem('robot-workbench-local-backup',JSON.stringify({savedAt:new Date().toISOString(),project:prev}));
   }catch(e){}
+  let source;
   if(next.length){
     try{
       localStorage.setItem('robot-workbench-prototype-v4',JSON.stringify(snap.project));
       localStorage.setItem('robot-workbench-prototype-v4-snapshot',JSON.stringify(snap));
     }catch(e){}
     flows=next;
+    source='host';
     console.info('画布：按宿主同步 '+next.length+' 条流程');
   }else{
     flows=createFeatureExamples();
+    source='examples';
     console.info('画布：宿主没有画布，只留 '+flows.length+' 条示例');
   }
   open=flows.map(flow=>flow.id);
   if(!flows.some(flow=>flow.id===active)&&!libraryTabs.has(active))active=flows[0]?flows[0].id:'library';
   try{render();}catch(e){console.warn('画布：同步后重绘失败 '+e.message);}
+  const functionCount=flows.filter(flow=>!flow.compound).length;
+  const compoundCount=flows.filter(flow=>flow.compound).length;
+  const savedAt=snap&&snap.savedAt?snap.savedAt:null;
+  if(!silent)console.info('画布：同步完成 来源='+source+' 共'+flows.length+' 条');
+  return {ok:true,source,count:flows.length,functionCount,compoundCount,savedAt};
 }
 void syncFlowsFromHost();
 flowImportInput()?.addEventListener("change",event=>loadFlowFile(event.target));
