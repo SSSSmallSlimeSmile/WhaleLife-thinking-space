@@ -27,13 +27,26 @@ function allowed(req) {
 function headers(req) {
   return { ...req.headers, host: `${host}:${upstream}`, origin: targetOrigin };
 }
+// 首页文件名：index.html 优先；否则认浏览器下载默认名 canvas-index.html；
+// 再否则用目录里唯一的 .html。
+function resolveHtml() {
+  const direct = path.join(__dirname, 'index.html');
+  if (fs.existsSync(direct)) return direct;
+  const alt = path.join(__dirname, 'canvas-index.html');
+  if (fs.existsSync(alt)) return alt;
+  try {
+    const htmls = fs.readdirSync(__dirname).filter((n) => n.toLowerCase().endsWith('.html'));
+    if (htmls.length === 1) return path.join(__dirname, htmls[0]);
+  } catch {}
+  return direct;
+}
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && ['/','/index.html'].includes(req.url.split('?')[0])) {
     // A link from another app may mark a top-level navigation as cross-site.
     const normalNavigation=req.headers['sec-fetch-mode']==='navigate'&&req.headers['sec-fetch-dest']==='document';
     if (!localHost(req)||(!normalNavigation&&!allowed(req))) { res.writeHead(403).end(); return; }
     res.writeHead(200, {'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY'});
-    const file = fs.createReadStream(path.join(__dirname, 'index.html'));
+    const file = fs.createReadStream(resolveHtml());
     file.on('error', () => res.destroy());
     file.pipe(res);
     return;

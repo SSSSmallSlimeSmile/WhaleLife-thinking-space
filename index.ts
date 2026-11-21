@@ -749,7 +749,7 @@ type CanvasState = { pid: number | null; error?: string };
 // 画布纯净版的出处：插件仓库的 canvas/ 目录
 const CANVAS_RAW_BASE = "https://raw.githubusercontent.com/SSSSmallSlimeSmile/WhaleLife-thinking-space/main/canvas/";
 const CANVAS_FILES: Record<string, { file: string; label: string; type: string }> = {
-  "index.html": { file: "index.html", label: "canvas-index.html", type: "text/html; charset=utf-8" },
+  "index.html": { file: "index.html", label: "index.html", type: "text/html; charset=utf-8" },
   "workbench.cjs": { file: "whalelife-workbench.cjs", label: "whalelife-workbench.cjs", type: "application/javascript; charset=utf-8" },
 };
 function renderSettings(settings: Settings, stats: { total: number; single: number; composite: number }, canvas: CanvasState) {
