@@ -35,7 +35,7 @@ WhaleLife 插件。把「一串工具调用」存成一条可复用的技能，�
 ```
 plugins/thinking-space/
   index.ts
-  plugin.yaml          depends: [web, tools, models]
+  plugin.yaml          depends: [web, tools]
   README.md
   LICENSE  LICENSE-ADDITIONAL  NOTICE.md  THIRD_PARTY_NOTICES.md
   data/settings.example.json
@@ -47,18 +47,25 @@ plugins/thinking-space/
 
 **可选依赖**：技能里引用的工具得真存在，否则保存时校验不过、状态显示「待核实」。第一个示例用到了 `surf_search` / `surf_read`，装 `surf` 才有。
 
-### 导航入口
+### 一处要手改的地方
 
-插件自己声明导航，**不用改宿主任何文件**：
+「管理」分组里的导航入口，目前是**前端硬编码**的：
 
-```ts
-ctx.web.page("/plugins/thinking-space/", handler, { title: "思维空间", navigation: true });
+```html
+<!-- core/ui/index.html，管理组里 -->
+<a href="#extension:/plugins/thinking-space/"
+   data-page="extension:/plugins/thinking-space/"
+   id="space-nav" hidden><span data-icon="cube"></span>
+   <span id="space-nav-label">思维空间</span></a>
 ```
 
-装好后侧栏「插件页面」组会出现「思维空间」；点进去是设置主页，技能列表从主页的「查看技能列表」进。
+```js
+// core/ui/app.js，render 时
+$("space-nav").hidden = !page;
+```
 
-早期版本曾在 `core/ui/index.html` 和 `app.js` 里硬编码入口（`space-nav` / `thinkingSpaceTitle`），
-现已全部撤掉，仓库里不再需要任何主干改动。
+插件自己声明挂哪个导航组的能力，宿主还没有。不改这两处，插件照样能跑，只是入口只在「插件页面」组里。
+
 ---
 
 ## 三、技能长什么样
@@ -208,7 +215,19 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 ---
 
-## 九、已知限制与兼容性
+### 本机能力页（可选）
+
+设置页「当前状态」里有「查看本机能力 →」，打开 `/plugins/thinking-space/local`。
+
+它把当前宿主的工具目录整个列出来：按插件分组、每个工具的危险级、有没有声明输出结构，顶部徽章标出这台宿主提供的是 `catalog()` 还是降级的 `list()`。换台机器、装了新插件，点开就知道自己有什么、缺什么。
+
+同一页有「整理本机能力」按钮。扫一遍工具和技能，记下：哪些工具还没被任何技能用过、哪些插件有空闲工具、多少工具没声明输出结构。结果写进 `data/local-report.json`，下次打开还在，页面上显示上次整理的时间和结论。
+
+这一步只读——只看工具目录和技能库，不改任何技能、不改任何插件。
+
+---
+
+## 九、已知限制
 
 **一、页面只能验 HTML，验不了排版。** 我没法看浏览器，只能确认接口返回的元素在不在。
 
@@ -230,13 +249,7 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 ---
 
-**十、宿主版本要求。** 本插件在 2026-11-20 前后的宿主版本上开发，用到了 `ctx.tools.catalog()` 的 `outputSchema`、`ctx.web.page` 的 `navigation` 选项、`ctx.models` 依赖。更老的宿主可能缺这些字段，表现为：端口推不出、导航不出现、模型选择为空。缺字段时插件降级而不是崩，但功能会少一块。
-
-**十一、工具中文名是本机词典。** `TOOL_LABELS` 里那 50 条是开发机上装过的工具。别人装上后，自己插件里的工具会显示英文名（如 `my_tool`），功能不受影响，只是技能名、端口名读起来是英文。想中文化就往词典里加。
-
-**十二、触发语里的名字要改。** 设置里 `triggerPhrase` 默认「XXX，学会这个技能了吗？」，XXX 是占位符，装上后改成你自己的人格名。
-
-## 十三、许可
+## 十、许可
 
 AGPL-3.0。上游附加条款原文与 NOTICE 在包内。
 

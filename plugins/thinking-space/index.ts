@@ -11,6 +11,7 @@ const PERSONA_SPAN = '<span data-persona>助手</span>';
 const storeFile = "skills.json";
 const settingsFile = "settings.json";
 const flowsFile = "flows.json";
+const localReportFile = "local-report.json";
 const paramDefaultsFile = "param-defaults.json";
 const pagePath = "/plugins/thinking-space/";
 const defaultSpaceUrl = "http://127.0.0.1:9281/";
@@ -2454,14 +2455,26 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       const hint = catalogOn
         ? "宿主提供 catalog()，插件归属、危险等级、输出声明都能读到。工具来自当前装载的插件，装什么就有什么，不会写死在技能库里。"
         : "这台宿主没有 catalog()，用的是 list() 降级读取：工具名和描述能用，插件归属、危险等级、输出声明拿不到，画布端口会标「未声明」。升级宿主后重新打开这一页即可。";
+      const report = await ctx.config.read<any>(localReportFile).catch(() => null) as any;
+      const reportBlock = report && typeof report === "object"
+        ? `<section class="space-panel"><h2>上次整理</h2>` +
+          `<p><span class="space-badge">${escape(String(report.at ?? ""))}</span>` +
+          `<span class="space-badge">${Number(report.toolCount) || 0} 个工具</span>` +
+          `<span class="space-badge">${Number(report.orphanCount) || 0} 个未被使用</span></p>` +
+          ((Array.isArray(report.suggestions) && report.suggestions.length)
+            ? `<ul style="margin:8px 0 0;padding-left:20px;font-size:13px">` + report.suggestions.map((x: any) => `<li>${escape(String(x))}</li>`).join("") + `</ul>`
+            : `<p class="space-muted">没有发现值得提的地方。</p>`) +
+          `</section>`
+        : "";
       const table = `width:100%;border-collapse:collapse;font-size:13px;text-align:left`;
-      const body = `<div class="space-toolbar"><a class="btn space-secondary" href="${pagePath}">← 返回设置</a></div>` +
+      const body = `<div class="space-toolbar"><a class="btn space-secondary" href="${pagePath}">← 返回设置</a>` +
+        `<form method="post" action="${pagePath}tidy" style="margin-left:8px;display:inline"><button class="btn space-primary" type="submit">整理本机能力</button></form></div>` +
         `<section class="space-panel"><h2>本机能力</h2>` +
         `<p><span class="space-badge${catalogOn ? "" : " warn"}">catalog ${catalogOn ? "可用" : "不可用"}</span>` +
         `<span class="space-badge${listOn ? "" : " warn"}">list ${listOn ? "可用" : "不可用"}</span>` +
         `<span class="space-badge">${tools.length} 个工具</span>` +
         `<span class="space-badge">${skillCount} 条技能</span></p>` +
-        `<p class="space-muted">${escape(hint)}</p></section>` +
+        `<p class="space-muted">${escape(hint)}</p></section>` + reportBlock +
         `<section class="space-panel"><h2>按插件分组</h2>` +
         (pluginRows
           ? `<table style="${table}"><thead><tr><th ${cell}>插件</th><th ${cell}>工具数</th></tr></thead><tbody>${pluginRows}</tbody></table>`
@@ -2477,6 +2490,57 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       res.end(html("本机能力", `<p>读本机能力时出错：${escape(String(err?.message || err))}</p>`));
     }
   }, { title: "本机能力", navigation: false });
+  ctx.web.api("/plugins/thinking-space/tidy", async (_req: any, res: any) => {
+    try {
+      const tools = await toolsSafe();
+      const store = await readStore().catch(() => ({ schemaVersion: 1, skills: [] } as Store));
+      const usedNames = new Set<string>();
+      for (const skill of store.skills ?? []) {
+        for (const step of skill.steps ?? []) usedNames.add(String((step as any).tool ?? ""));
+      }
+      const plugins = new Map<string, { tools: number; used: number }>();
+      const orphans: string[] = [];
+      const undeclared: string[] = [];
+      for (const tool of tools) {
+        const name = String(tool?.name ?? "");
+        if (!name) continue;
+        const key = String(tool?.plugin || "").trim() || "未标注";
+        const bucket = plugins.get(key) ?? { tools: 0, used: 0 };
+        bucket.tools += 1;
+        if (usedNames.has(name)) bucket.used += 1; else orphans.push(name);
+        if (!Array.isArray(tool?.outputs) || !tool.outputs.length) undeclared.push(name);
+        plugins.set(key, bucket);
+      }
+      const suggestions: string[] = [];
+      let pluginTips = 0;
+      for (const [name, bucket] of [...plugins.entries()].sort((a, b) => b[1].tools - a[1].tools)) {
+        if (name === "thinking-space") continue;
+        const spare = bucket.tools - bucket.used;
+        if (spare >= 2 && pluginTips < 4) {
+          suggestions.push("「" + name + "」还有 " + spare + " 个工具没被任何技能用过，可以先挑两三个串成一条。");
+          pluginTips += 1;
+        }
+      }
+      if (undeclared.length >= 3) suggestions.push(undeclared.length + " 个工具没有声明输出结构，画布连线时端口会标「未声明」，只能靠跑一次观测形状。");
+      if (!store.skills.length) suggestions.push("技能库还是空的。先用 space_draft 起草一条，跑通再存。");
+      const report = {
+        at: new Date().toISOString(),
+        toolCount: tools.length,
+        skillCount: store.skills.length,
+        orphanCount: orphans.length,
+        plugins: [...plugins.entries()].map(([name, bucket]) => ({ name, ...bucket })),
+        orphans: orphans.slice(0, 50),
+        undeclared: undeclared.slice(0, 50),
+        suggestions: suggestions.slice(0, 8),
+      };
+      await ctx.config.save(localReportFile, report as any);
+      res.writeHead(303, { Location: pagePath + "local?tidied=" + encodeURIComponent(report.at) });
+      res.end();
+    } catch (error) {
+      res.writeHead(303, { Location: pagePath + "local?tidy_err=" + encodeURIComponent(error instanceof Error ? error.message : "整理失败。") });
+      res.end();
+    }
+  });
   ctx.web.page("/plugins/thinking-space/settings", async (req: any, res: any) => {
     try {
       const query = new URL(req.url ?? "/", "http://localhost").searchParams;
