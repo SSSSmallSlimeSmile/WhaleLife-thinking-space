@@ -236,6 +236,10 @@ main>.flow-toolbar{
 .canvas-zoom{display:flex;align-items:center;gap:3px}
 .canvas-zoom button{padding-inline:7px;min-width:30px}
 .canvas-zoom [data-zoom-step="reset"]{min-width:58px;font-variant-numeric:tabular-nums}
+.skill-group-title{font-size:17px;margin:24px 0 12px;padding-left:10px;border-left:4px solid var(--accent)}
+.skill-group-title[data-node-kind="compound"]{border-left-color:var(--node-compound)}
+.skill-steps{font-size:12px;color:var(--muted);word-break:break-word}
+.card.skill-card[data-node-kind="compound"]{border-color:var(--node-compound)}
 .flow-toolbar .wish-run-preview{grid-area:preview;justify-self:end;margin-top:8px}
 @media(max-width:520px){
   main>.flow-toolbar{
@@ -578,7 +582,9 @@ const libraryTabs=new Map([
   ['library','工具库'],
   ['function-library','功能库'],
   ['compound-library','复合功能库'],
+  ['skill-library','技能组'],
 ]);
+let hostSkills=null,hostSkillMeta=null,syncingHostSkills=false,hostSkillsTried=false;
 const groupFlow={
   id:'qq-group-image',name:'QQ群聊生图',demo:'group-image',compound:true,
   nodes:[
@@ -2337,6 +2343,7 @@ function render(){
   }).join('')+renderDetailTabs()+'<button data-action="flows" aria-label="打开或新建工作流">＋</button>';
   tabs.querySelector(`[data-tab="${active}"]`)?.classList.add('active');
   if(detailTabs[active]){renderNodePage();return;}
+  if(active==='skill-library'){renderSkillLibrary();return;}
   if(active==='library'){renderLibrary();return;}
   if(libraryTabs.has(active)){renderFlowLibrary(active==='compound-library');return;}
   renderEditor();
@@ -2396,6 +2403,61 @@ function renderLibrary(){
   if(filter)filter.onchange=()=>{library.filter=filter.value;update();};
   confidence.onchange=()=>{library.verify=confidence.value;update();};
   update();
+}
+function skillCard(skill){
+  const steps=(skill.steps||[]).map(step=>safe(step.tool||step.id)).join(' → ');
+  const kindLabel=skill.kind==='composite'?'复合':'单步';
+  return `<article class="card skill-card" data-node-kind="${skill.kind==='composite'?'compound':'function'}"><strong>${safe(skill.name)}</strong><small>${kindLabel} · ${skill.stepCount} 步 · ${safe(skill.danger||'safe')} · ${safe(skill.status||'')} · rev ${skill.revision||0}</small>${steps?`<p class="skill-steps" title="步骤顺序">${steps}</p>`:''}${skill.description?`<p>${safe(skill.description)}</p>`:''}</article>`;
+}
+function renderSkillLibrary(){
+  if(!hostSkillsTried){hostSkillsTried=true;void syncHostSkills({silent:true});}
+  const list=Array.isArray(hostSkills)?hostSkills:null;
+  const single=list?list.filter(skill=>skill.kind!=='composite'):[];
+  const composite=list?list.filter(skill=>skill.kind==='composite'):[];
+  const meta=hostSkillMeta||{};
+  const stamp=meta.syncedAt?new Date(meta.syncedAt).toLocaleTimeString('zh-CN'):'';
+  const summary=list
+    ? `宿主技能库：${meta.total??list.length} 条（功能 ${single.length} · 复合 ${composite.length}）${stamp?' · 同步于 '+safe(stamp):''}${meta.allowUse===false?' · 宿主已关闭「允许使用整理好的技能」':''}`
+    : (syncingHostSkills?'正在读宿主技能库…':'还没同步过。点上面的按钮，把思维空间里的技能组读过来。');
+  main.innerHTML=`<section class="library"><div class="toolbar"><h1>技能组</h1><button data-action="sync-host-skills" ${syncingHostSkills?'disabled':''}>同步宿主技能组</button></div>
+    <p class="muted" style="margin-top:13px">${safe(summary)}</p>
+    ${list?`<h2 class="skill-group-title" data-node-kind="function">功能组（${single.length}）</h2><div class="cards">${single.map(skillCard).join('')||'<p class="muted">这一组是空的。</p>'}</div><h2 class="skill-group-title" data-node-kind="compound">复合功能组（${composite.length}）</h2><div class="cards">${composite.map(skillCard).join('')||'<p class="muted">这一组是空的。</p>'}</div>`:''}
+  </section>`;
+}
+async function syncHostSkills(options={}){
+  const silent=options.silent===true;
+  if(syncingHostSkills)return null;
+  syncingHostSkills=true;
+  const repaint=()=>{try{if(active==='skill-library')renderSkillLibrary();}catch(error){}};
+  repaint();
+  let payload=null;
+  try{
+    const res=await fetch('/plugins/thinking-space/skills?t='+Date.now(),{credentials:'same-origin',cache:'no-store'});
+    if(!res.ok)throw new Error('宿主返回 HTTP '+res.status);
+    payload=await res.json();
+  }catch(error){
+    syncingHostSkills=false;hostSkillsTried=true;
+    const message=error instanceof Error?error.message:String(error);
+    repaint();
+    if(silent){console.info('技能组：没读成 '+message);return {ok:false,message};}
+    showDialog('同步宿主技能组',`<p>没读成：${safe(message)}</p><p class="muted">检查 WhaleLife 是否在跑、thinking-space 插件是否还装着。</p><div class="actions">${closeButton}</div>`);
+    return {ok:false,message};
+  }
+  syncingHostSkills=false;hostSkillsTried=true;
+  if(!payload||payload.ok!==true||!Array.isArray(payload.skills)){
+    const message=payload&&payload.error?String(payload.error):'宿主回来了，但没给技能列表';
+    repaint();
+    if(silent){console.info('技能组：'+message);return {ok:false,message};}
+    showDialog('同步宿主技能组',`<p>${safe(message)}</p><div class="actions">${closeButton}</div>`);
+    return {ok:false,message};
+  }
+  hostSkills=payload.skills.map(skill=>({...skill}));
+  hostSkillMeta={total:Number(payload.total??hostSkills.length),single:Number(payload.single??0),composite:Number(payload.composite??0),allowUse:payload.allowUse!==false,syncedAt:payload.syncedAt||null};
+  repaint();
+  const meta=hostSkillMeta;
+  if(silent)return {ok:true,total:meta.total,single:meta.single,composite:meta.composite};
+  showDialog('同步宿主技能组',`<p>宿主技能库现在 ${meta.total} 条：功能组 ${meta.single} 条、复合功能组 ${meta.composite} 条。</p>${meta.allowUse?'':'<p class="muted">宿主那边「允许使用整理好的技能」是关着的，这些组暂时不会被自动调用。</p>'}<p class="muted">技能组是宿主那头的定义，画布这边只读：要改就去思维空间的技能列表改，或者把画布上的功能「发布到思维空间」。</p><div class="actions">${closeButton}</div>`);
+  return {ok:true,total:meta.total,single:meta.single,composite:meta.composite};
 }
 function renderEditor(){
   const flow=getFlow(), view=views[flow.id]??={};
@@ -2965,6 +3027,7 @@ document.addEventListener('click',event=>{
     case 'dismiss':dialog.close();break;
     case 'open-market':{const w=window.open('/market/','_blank','noopener');if(!w)location.href='/market/';break;}
     case 'sync-plugin-library':void syncPluginLibrary();break;
+    case 'sync-host-skills':void syncHostSkills();break;
     case 'restore-builtin':library.hostOnly=false;library.mode='all';library.filter='';library.query='';render();break;
     case 'inventory-report':
       showDialog('接口盘点原文',`<pre class="inventory-source">${safe(inventory.report)}</pre><div class="actions">${closeButton}</div>`);break;

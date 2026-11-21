@@ -1,6 +1,6 @@
 id: canvas
 name: 思维画布
 description: 把思维空间的工具链画成流程图的画布：独立的 node 进程，可单独启停，跟着思维空间一起收。
-version: 0.1.1
+version: 0.1.2
 apiVersion: "1.0.0"
 depends: [web]

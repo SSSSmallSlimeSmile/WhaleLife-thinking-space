@@ -385,6 +385,10 @@ function html(title: string, body: string) {
 <style>
 .space-toolbar{display:flex;justify-content:flex-start;gap:10px;margin-bottom:16px}
 .space-secondary{display:inline-flex;align-items:center;padding:10px 18px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:inherit;text-decoration:none;font-size:14px;font-weight:600}
+.space-secondary.strong{border-color:var(--accent);background:var(--accent);color:#fff;font-weight:700;box-shadow:0 4px 14px rgba(97,88,217,.28)}
+.space-secondary.strong:hover{background:#3d2f9c}
+.space-secondary.teal{border-color:rgba(50,139,109,.55);background:rgba(50,139,109,.14);color:#2f8f6d;font-weight:700}
+.space-secondary.teal:hover{background:rgba(50,139,109,.24)}
 .space-rules{margin:14px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:rgba(127,127,127,.05)}.space-rules h3{margin:0 0 8px;font-size:13px;letter-spacing:.04em;color:var(--ink);opacity:.75}.space-rules ol{margin:0;padding-left:20px;font-size:13px;line-height:1.75}.space-rules li{margin:2px 0}.space-rules strong{font-weight:600}.space-panel{background:var(--surface)}
 .space-panel form>p{margin-bottom:24px}
 .space-panel form{display:block}
@@ -761,7 +765,7 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
   <h2>当前状态</h2>
   <p><span class="space-badge">${stats.total} 条技能</span><span class="space-badge">单步 ${stats.single}</span><span class="space-badge">复合 ${stats.composite}</span></p>
   <p class="space-muted">自动整理思维：${settings.autoOrganize ? "开着" : "关着"}。技能列表里每条会显示跑过几次、上次成没成；连着几次没跑成会单独提醒你看一眼。</p>
-  <p style="margin-top:12px"><a class="btn space-secondary" href="${pagePath}space">查看技能列表 →</a><a class="btn space-secondary" href="${pagePath}local" style="margin-left:8px">查看本机能力 →</a></p>
+  <p style="margin-top:12px"><a class="btn space-secondary strong" href="${pagePath}space">查看技能列表 →</a><a class="btn space-secondary teal" href="${pagePath}local" style="margin-left:8px">查看本机能力 →</a></p>
 </section>
 <section class="space-panel">
   <h2>设置</h2>
@@ -2353,6 +2357,45 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       json(500, { ok: false, error: error instanceof Error ? error.message : "读取工具目录失败。" });
     }
   }, { title: "工具目录", navigation: false });
+  ctx.web.page("/plugins/thinking-space/skills", async (_req: any, res: any) => {
+    const json = (status: number, body: unknown) => {
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    try {
+      const items = await list();
+      const skills = items.map((skill: any) => ({
+        id: String(skill?.id ?? ""),
+        name: String(skill?.name ?? skill?.id ?? ""),
+        description: String(skill?.description ?? ""),
+        kind: String(skill?.kind ?? "single"),
+        stepCount: Number(skill?.steps?.length ?? 0),
+        steps: (Array.isArray(skill?.steps) ? skill.steps : []).map((step: any) => ({
+          id: String(step?.id ?? ""),
+          tool: String(step?.tool ?? ""),
+          plugin: String(step?.plugin ?? ""),
+          available: step?.available !== false,
+        })),
+        danger: String(skill?.danger ?? "safe"),
+        status: String(skill?.status ?? "仅声明"),
+        revision: Number(skill?.revision ?? 0),
+        useWhen: String(skill?.useWhen ?? ""),
+        notFor: String(skill?.notFor ?? ""),
+      })).filter((skill: any) => skill.id);
+      const settings = await readSettings();
+      json(200, {
+        ok: true,
+        total: skills.length,
+        single: skills.filter((skill: any) => skill.kind !== "composite").length,
+        composite: skills.filter((skill: any) => skill.kind === "composite").length,
+        allowUse: !!settings.allowUse,
+        syncedAt: new Date().toISOString(),
+        skills,
+      });
+    } catch (error) {
+      json(500, { ok: false, error: error instanceof Error ? error.message : "读取技能库失败。" });
+    }
+  }, { title: "技能组", navigation: false });
   ctx.web.page("/plugins/thinking-space/flows", async (req: any, res: any) => {
     try {
       const stored = await ctx.config.read<{ savedAt?: string; snapshot?: unknown }>(flowsFile);
