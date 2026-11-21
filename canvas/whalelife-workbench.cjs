@@ -2,8 +2,12 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const port = Number(process.env.WORKBENCH_PORT || 9281);
-const upstream = Number(process.env.WORKBENCH_WHALE_PORT || 9270);
+function argOf(name) {
+  const i = process.argv.indexOf(name);
+  return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : '';
+}
+const port = Number(argOf('--port') || process.env.WORKBENCH_PORT || 9281);
+const upstream = Number(argOf('--upstream') || process.env.WORKBENCH_WHALE_PORT || 9270);
 if (![port, upstream].every(value => Number.isInteger(value) && value > 0 && value <= 65535) || port === upstream) {
   throw new Error('请选择两个不同的有效端口。');
 }
