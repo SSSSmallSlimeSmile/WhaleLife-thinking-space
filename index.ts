@@ -5,7 +5,7 @@
 import type { Context, ToolContract } from "whalelife";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 
 const storeFile = "skills.json";
 const settingsFile = "settings.json";
@@ -2076,13 +2076,17 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
     const pid = Number(result.out.trim());
     return Number.isInteger(pid) && pid > 0 ? pid : null;
   }
+  async function canvasCmdline(pid: number): Promise<string> {
+    const result = await ps(`(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue).CommandLine`);
+    return result.out.trim();
+  }
   async function canvasState(): Promise<CanvasState> {
     const pid = await canvasPid();
     return pid ? { pid } : { pid: null, ...(canvasError ? { error: canvasError } : {}) };
   }
   async function startCanvas(): Promise<string> {
     const running = await canvasPid();
-    if (running) { canvasError = undefined; return `画布已经在跑了（PID ${running}）。`; }
+    if (running) { canvasHostPid = running; canvasError = undefined; return `画布已经在跑了（PID ${running}）。`; }
     const script = (await readSettings()).canvasScript;
     if (!script) { canvasError = "还没配置画布脚本路径：设置页 → 画布服务 → 画布脚本路径，填完整路径。"; return canvasError; }
     if (!existsSync(script)) { canvasError = `找不到脚本：${script}`; return canvasError; }
@@ -2108,10 +2112,20 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
   async function stopCanvas(): Promise<string> {
     const pid = await canvasPid();
     if (!pid) { canvasError = undefined; return "本来就没在跑。"; }
-    // 只停这个实例自己拉起来的进程：端口上跑的可能是不相干的本地服务，不动它。
-    if (canvasHostPid === null || canvasHostPid !== pid) {
-      canvasError = `端口 ${canvasPort} 上的进程（PID ${pid}）不是这个实例启动的，没有动它。要停请自己结束那个进程。`;
-      return canvasError;
+    // 只停画布本身：端口上跑的可能是不相干的本地服务，不动它。
+    // 不能只认"这个实例拉起的"——宿主重启过、或画布是手动起的，那边的记录就没了。
+    // 所以再看命令行：能认出是画布脚本就停，认不出才拒绝。
+    if (canvasHostPid !== pid) {
+      const cmd = await canvasCmdline(pid);
+      const script = (await readSettings()).canvasScript;
+      const expected = script ? basename(script) : "";
+      const looksCanvas =
+        !!cmd &&
+        (/whalelife-workbench/i.test(cmd) || (!!expected && cmd.includes(expected)));
+      if (!looksCanvas) {
+        canvasError = `端口 ${canvasPort} 上的进程（PID ${pid}）看起来不是画布脚本，没有动它。命令行：${cmd || "（读不到）"}`;
+        return canvasError;
+      }
     }
     await ps(`taskkill /PID ${pid} /F`);
     if (await canvasPid()) { canvasError = `停不下来（PID ${pid}）。`; return canvasError; }
