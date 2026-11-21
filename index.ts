@@ -748,6 +748,8 @@ function readBody(req: any, limit = 8192): Promise<string> {
 type CanvasState = { pid: number | null; error?: string };
 // 画布纯净版的出处：插件仓库的 canvas/ 目录
 const CANVAS_RAW_BASE = "https://raw.githubusercontent.com/SSSSmallSlimeSmile/WhaleLife-thinking-space/main/canvas/";
+// 内容接口不吃 CDN 缓存，刚发布的版本也能立刻取到
+const CANVAS_API_BASE = "https://api.github.com/repos/SSSSmallSlimeSmile/WhaleLife-thinking-space/contents/canvas/";
 const CANVAS_FILES: Record<string, { file: string; label: string; type: string }> = {
   "index.html": { file: "index.html", label: "index.html", type: "text/html; charset=utf-8" },
   "workbench.cjs": { file: "whalelife-workbench.cjs", label: "whalelife-workbench.cjs", type: "application/javascript; charset=utf-8" },
@@ -2401,14 +2403,25 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         res.end("没有这个画布文件。可选：index.html、workbench.cjs");
         return;
       }
-      const upstream = await fetch(CANVAS_RAW_BASE + spec.file, { signal: AbortSignal.timeout(15000) });
-      if (!upstream.ok) {
-        res.statusCode = 502;
-        res.setHeader("content-type", "text/plain; charset=utf-8");
-        res.end("从仓库取画布失败：HTTP " + upstream.status + "。可以直接打开 " + CANVAS_RAW_BASE + spec.file);
-        return;
+      // 先走 GitHub 内容接口：raw 有 CDN 缓存，刚发布的版本可能还是旧的。
+      let body: Buffer | null = null;
+      try {
+        const api = await fetch(CANVAS_API_BASE + spec.file + "?ref=main", {
+          headers: { accept: "application/vnd.github.raw", "user-agent": "whalelife-thinking-space" },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (api.ok) body = Buffer.from(await api.arrayBuffer());
+      } catch { /* 接口不通就走 raw */ }
+      if (!body) {
+        const upstream = await fetch(CANVAS_RAW_BASE + spec.file, { signal: AbortSignal.timeout(15000) });
+        if (!upstream.ok) {
+          res.statusCode = 502;
+          res.setHeader("content-type", "text/plain; charset=utf-8");
+          res.end("从仓库取画布失败：HTTP " + upstream.status + "。可以直接打开 " + CANVAS_RAW_BASE + spec.file);
+          return;
+        }
+        body = Buffer.from(await upstream.arrayBuffer());
       }
-      const body = Buffer.from(await upstream.arrayBuffer());
       res.statusCode = 200;
       res.setHeader("content-type", spec.type);
       res.setHeader("content-length", String(body.length));
