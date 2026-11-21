@@ -745,8 +745,7 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
   <p>思维空间把工具链存成<strong>技能</strong>：单步的进功能库，多步串起来的进复合功能库。技能存在服务端，不用打开这个页面，对话里就能直接读写。</p>
   <p>在画布页里画流程、看每个节点的接口和权限，画好回来存成技能，一句话就能调用，不必每次重新串一遍工具。</p>
   <p class="space-muted">技能存下来，对话里直接就能用；你也能在这页点「跑一次」。每一步的结果、耗时和失败原因都会留在回执里，按 runId 可回查一小时。</p>
-  <p style="margin:14px 0 8px"><a class="space-open" href="/plugins/thinking-space/canvas/">前往画布 →</a></p>
-  <p class="space-muted">画布是子插件「思维画布」，跟着这个包一起装；启动停止、端口和脚本路径都在那一页。</p>
+  <p class="space-muted">画布是子插件「思维画布」，跟着这个包一起装；启动停止、端口和脚本路径都在它的插件页里。</p>
   <div class="space-rules">
     <h3>技能守则</h3>
     <ol>
