@@ -7,7 +7,6 @@ import { execFile, spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 
-const PERSONA_SPAN = '<span data-persona>助手</span>';
 const storeFile = "skills.json";
 const settingsFile = "settings.json";
 const flowsFile = "flows.json";
@@ -756,9 +755,9 @@ const CANVAS_FILES: Record<string, { file: string; label: string; type: string }
 function renderSettings(settings: Settings, stats: { total: number; single: number; composite: number }, canvas: CanvasState) {
   return `<section class="space-panel">
   <h2>这是什么</h2>
-  <p>思维空间把工具链存成<strong>技能</strong>：单步的进功能库，多步串起来的进复合功能库。技能存在服务端，${PERSONA_SPAN}能直接读写，不用打开这个页面。</p>
-  <p>在画布页里画流程、看每个节点的接口和权限，画好回来存成技能，${PERSONA_SPAN}就能一句话调用，不必每次重新串一遍工具。</p>
-  <p class="space-muted">技能存下来，${PERSONA_SPAN}在对话里直接就能用；你也能在这页点「跑一次」。每一步的结果、耗时和失败原因都会留在回执里，按 runId 可回查一小时。</p>
+  <p>思维空间把工具链存成<strong>技能</strong>：单步的进功能库，多步串起来的进复合功能库。技能存在服务端，不用打开这个页面，对话里就能直接读写。</p>
+  <p>在画布页里画流程、看每个节点的接口和权限，画好回来存成技能，一句话就能调用，不必每次重新串一遍工具。</p>
+  <p class="space-muted">技能存下来，对话里直接就能用；你也能在这页点「跑一次」。每一步的结果、耗时和失败原因都会留在回执里，按 runId 可回查一小时。</p>
   <p class="space-muted">画布是单独的组件，不随插件自动安装。想要的话，把两个文件下载到同一个目录，运行 <code>node whalelife-workbench.cjs</code>，默认开 9281，再在设置页把「画布脚本路径」指过去。</p>
   <p class="space-row">
     <a class="btn space-secondary" href="/plugins/thinking-space/canvas-download?f=index.html" download>下载画布页面</a>
@@ -795,16 +794,16 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
   <h2>设置</h2>
   <form method="post" action="/plugins/thinking-space/settings">
     <label class="space-check"><input type="checkbox" name="allowUse"${settings.allowUse ? " checked" : ""}><span>允许使用整理好的技能</span></label>
-    <p class="space-muted">默认开。允许${PERSONA_SPAN}参考和使用已经保存的技能；关掉后保留技能，但不应使用。当前版本尚未提供技能执行器，此开关会随技能列表返回，供调用方遵守。</p>
+    <p class="space-muted">默认开。允许在对话里参考和使用已经保存的技能；关掉后保留技能，但不应使用。此开关会随技能列表返回，供调用方遵守。</p>
     <label class="space-check" style="margin-top:24px"><input type="checkbox" name="autoOrganize"${settings.autoOrganize ? " checked" : ""}><span>自动整理思维</span></label>
-    <p class="space-muted">开着时，${PERSONA_SPAN}在对话里会自己把反复用到的一串动作整理成技能存进来，不必每次开口。它不会在没人说话时自己醒来——那需要自主唤醒，还没有。关掉之后只在明确要求时才保存。默认开。</p>
+    <p class="space-muted">开着时，在对话里会把反复用到的一串动作整理成技能存进来，不必每次开口。它不会在没人说话时自己醒来——那需要自主唤醒，还没有。关掉之后只在明确要求时才保存。默认开。</p>
 
     <label class="space-check" style="margin-top:18px"><input type="checkbox" name="learnOnRequest"${settings.learnOnRequest ? " checked" : ""}><span>听一句话就学</span></label>
-    <p class="space-muted">默认开。开着时你只要说一句「${PERSONA_SPAN}，这个技能学会了吗？」，我就会去看刚才反复做的动作，整理成技能存进来，再回你存了什么。它自己不会先跑，还是要你开口。关掉之后，只在设置页点「立即整理」，或者我明确被要求时才整理。</p>
+    <p class="space-muted">默认开。开着时你只要说一句「XXX，这个技能学会了吗？」，我就会去看刚才反复做的动作，整理成技能存进来，再回你存了什么。它自己不会先跑，还是要你开口。关掉之后，只在设置页点「立即整理」，或者我明确被要求时才整理。</p>
 
     <div class="space-field">听哪一句话</div>
     <input type="text" name="triggerPhrase" maxlength="80" value="${escape(settings.triggerPhrase)}">
-    <p class="space-muted" style="margin-top:6px">出厂是「XXX，你学会了吗？」。XXX 会按当前人格名显示，换成${PERSONA_SPAN}就是「${PERSONA_SPAN}，你学会了吗？」。你可以改成自己顺口的说法，只要意思还是「去把刚才反复做的动作学下来」。</p>
+    <p class="space-muted" style="margin-top:6px">出厂是「XXX，你学会了吗？」。XXX 会换成当前人格名。你可以改成自己顺口的说法，只要意思还是「去把刚才反复做的动作学下来」。</p>
 
     <div class="space-field">连续出现几次才算一条链</div>
     <input type="number" name="organizeThreshold" min="2" max="10" value="${settings.organizeThreshold}">
