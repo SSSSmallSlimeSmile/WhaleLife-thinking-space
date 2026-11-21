@@ -32,18 +32,47 @@ WhaleLife 插件。把「一串工具调用」存成一条可复用的技能，�
 
 ## 二、怎么装
 
-**仓库根就是插件目录**，直接 clone 进 `plugins/thinking-space` 即可：
+### 一条命令（推荐）
+
+Release 里的包是 `.wlpkg.gz`（gzip + 首行清单 + 内容），普通解压工具打不开。
+用仓库根的 `install.mjs` 下载、校验、释放：
+
+```bash
+node install.mjs --host "K:\WhaleLife\whalelife"
+```
+
+它做四件事：
+
+```
+下载 thinking-space-0.1.0.wlpkg.gz
+逐文件比对 sha256（不一致就停，不写半个文件）
+释放到 <宿主>/plugins/thinking-space
+写 data/install.json 记录版本、来源、包摘要
+```
+
+参数：
+
+| 参数 | 作用 |
+| --- | --- |
+| `--host <目录>` | 宿主根目录（下面要有 `plugins/`）。省略时用当前目录 |
+| `--file <包路径>` | 用本地包，不联网 |
+| `--force` | 覆盖已存在的插件目录（原有的 `data/` 内容保留） |
+
+装完重启宿主，或到插件页点一次 reload。
+
+### 手动装
+
+仓库根就是插件目录，也可以 clone 或解压 zip 到 `plugins/thinking-space`：
 
 ```bash
 git clone https://github.com/SSSSmallSlimeSmile/WhaleLife-thinking-space.git plugins/thinking-space
 ```
 
-或者下载 zip 解压到 `plugins/thinking-space`。
-
 ```
 plugins/thinking-space/
   plugin.yaml          depends: [web, tools, models]
   index.ts
+  install.mjs          一键安装脚本
   data/settings.example.json
   canvas/              画布组件（可选）
   docs/                技术说明与实测数据
@@ -58,7 +87,6 @@ plugins/thinking-space/
 **可选绑定**：技能里用到的工具得在宿主里存在，否则保存时校验不过。常用的是 `surf_search` / `surf_read`（装 `surf`）。
 
 ---
-
 ## 三、技能长什么样
 
 ```json
