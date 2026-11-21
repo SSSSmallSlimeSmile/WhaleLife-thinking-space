@@ -7,8 +7,10 @@ import { execFile, spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 
+const PERSONA_SPAN = '<span data-persona>助手</span>';
 const storeFile = "skills.json";
 const settingsFile = "settings.json";
+const flowsFile = "flows.json";
 const paramDefaultsFile = "param-defaults.json";
 const pagePath = "/plugins/thinking-space/";
 const defaultSpaceUrl = "http://127.0.0.1:9281/";
@@ -26,7 +28,7 @@ type Danger = typeof dangers[number];
 type JsonObject = Record<string, unknown>;
 type Parameter = { name: string; type: typeof types[number]; required: boolean; aliases?: string[]; label?: string };
 type Step = { id: string; tool: string; plugin: string; params: JsonObject; next: string | null };
-type Skill = { schemaVersion: 1; id: string; name: string; description: string; kind: "single" | "composite"; params: Parameter[]; steps: Step[]; danger: Danger; revision?: number };
+type Skill = { schemaVersion: 1; id: string; name: string; description: string; kind: "single" | "composite"; params: Parameter[]; steps: Step[]; danger: Danger; revision?: number; useWhen?: string; notFor?: string; outputs?: string };
 type Store = { schemaVersion: 1; skills: Skill[] };
 type Settings = { observeHands: boolean; allowRiskyChains: boolean; allowSave: boolean; allowUse: boolean; maxSteps: number; autoOrganize: boolean; spaceUrl: string; stepTimeoutSeconds: number; organizeThreshold: number; organizeWindowMinutes: number; autoSaveOrganized: boolean; learnOnRequest: boolean; triggerPhrase: string; canvasScript: string };
 
@@ -127,6 +129,9 @@ function validateSkill(id: unknown, spec: unknown, catalog: Map<string, ToolCont
   if (kind !== "single" && kind !== "composite") throw new Error("kind 须为 single 或 composite。");
   const name = requireText(spec.name, 80, "技能名称");
   const description = requireText(spec.description, 500, "技能说明", true);
+  const useWhen = spec.useWhen === undefined ? "" : requireText(spec.useWhen, 300, "适用目标", true);
+  const notFor = spec.notFor === undefined ? "" : requireText(spec.notFor, 300, "不适用情形", true);
+  const outputs = spec.outputs === undefined ? "" : requireText(spec.outputs, 300, "输出说明", true);
   if (!Array.isArray(spec.params) || spec.params.length > 32) throw new Error("params 须为参数列表，最多 32 项。");
   const declared = new Set<string>();
   const params: Parameter[] = spec.params.map(param => {
@@ -175,7 +180,8 @@ function validateSkill(id: unknown, spec: unknown, catalog: Map<string, ToolCont
     previous.add(item.id);
     return { id: item.id, tool: tool.name, plugin: tool.plugin, params: item.params, next };
   });
-  return { schemaVersion: 1, id, name, description, kind, params, steps, danger: dangerFor(steps, catalog, "full") };
+  return { schemaVersion: 1, id, name, description, kind, params, steps, danger: dangerFor(steps, catalog, "full"),
+    ...(useWhen ? { useWhen } : {}), ...(notFor ? { notFor } : {}), ...(outputs ? { outputs } : {}) };
 }
 
 // ---- 执行器：第二阶段 ----
@@ -184,7 +190,7 @@ type StepResult = { id: string; tool: string; plugin: string; status: RunStatus;
 type CutNote = { key: string; kept: unknown; droppedCount: number };
 type TrimNote = { from: number; to: number; dropped: { id: string; tool: string; why: string }[]; revision: number; cut?: CutNote[] };
 type RelevanceNote = { status: "matched" | "weak" | "unrelated" | "unassessed"; hits: number; terms: number; ratio: number; basis: string };
-type RunResult = { status: RunStatus; runId: string; skill: string; steps: StepResult[]; error?: string; trimmed?: TrimNote; relevance?: RelevanceNote };
+type RunResult = { status: RunStatus; runId: string; skill: string; steps: StepResult[]; error?: string; trimmed?: TrimNote; trimSuggestion?: TrimNote; relevance?: RelevanceNote };
 
 const sideEffectTools = new Set(["hands_write", "hands_run", "qq_send_image", "qq_send_meme", "mouth_say", "speak"]);
 
@@ -383,7 +389,7 @@ function html(title: string, body: string) {
 <style>
 .space-toolbar{display:flex;justify-content:flex-start;gap:10px;margin-bottom:16px}
 .space-secondary{display:inline-flex;align-items:center;padding:10px 18px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:inherit;text-decoration:none;font-size:14px;font-weight:600}
-.space-panel{background:var(--surface)}
+.space-rules{margin:14px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:rgba(127,127,127,.05)}.space-rules h3{margin:0 0 8px;font-size:13px;letter-spacing:.04em;color:var(--ink);opacity:.75}.space-rules ol{margin:0;padding-left:20px;font-size:13px;line-height:1.75}.space-rules li{margin:2px 0}.space-rules strong{font-weight:600}.space-panel{background:var(--surface)}
 .space-panel form>p{margin-bottom:24px}
 .space-panel form{display:block}
 .space-wrap{max-width:1080px;margin:0 auto;padding:20px 24px 72px}
@@ -420,8 +426,21 @@ function html(title: string, body: string) {
 .space-save:hover{background:#3d2f9c}
 .space-card{border:1px solid rgba(127,127,127,.2);border-radius:12px;padding:14px 16px;margin:0 0 12px}
 .space-card:last-child{margin-bottom:0}
-    .space-card-ops{margin:10px 0 4px}
+    .space-card-ops{margin:10px 0 4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .space-card-ops form{display:inline-flex;margin:0}
     .space-card-ops .space-secondary{padding:6px 14px;font-size:13px}
+    .space-trend-tabs{display:flex;gap:6px;margin:0 0 12px}
+    .space-trend-tabs a{padding:5px 12px;border-radius:8px;border:1px solid var(--line);font-size:13px;text-decoration:none;color:inherit}
+    .space-trend-tabs a.on{background:var(--accent);border-color:var(--accent);color:#fff}
+    .space-bars{display:flex;align-items:flex-end;gap:4px;height:96px;padding:6px 0 0;overflow-x:auto}
+    .space-bar{flex:1 1 0;min-width:10px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:2px}
+    .space-bar-ok{width:100%;background:#328b6d;border-radius:3px 3px 0 0}
+    .space-bar-fail{width:100%;background:#bf5762;border-radius:3px 3px 0 0}
+    .space-bar>span{font-size:10px;opacity:.6;white-space:nowrap}
+    .space-trend-table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
+    .space-trend-table th,.space-trend-table td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
+    .space-trend-table th{font-weight:600;opacity:.75;font-size:12px}
+    .space-trend-table td:not(:first-child){text-align:right}
 .space-card h3{margin:0 0 6px;font-size:15px;font-weight:650}
 .space-card p{margin:0 0 8px;line-height:1.6}
 .space-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:500;white-space:nowrap;background:rgba(127,127,127,.1);color:inherit;opacity:.72;margin:0 6px 0 0;line-height:1.5}
@@ -445,7 +464,7 @@ function html(title: string, body: string) {
 .space-run button{margin-top:0}
 .space-run-flag{display:flex;flex-direction:row;align-items:center;gap:7px;font-size:13px;font-weight:600;padding-bottom:8px}
 </style>
-<div class="space-wrap">${body}</div></html>`;
+<div class="space-wrap">${body}</div><script>(function(){fetch("/api/status",{credentials:"same-origin"}).then(function(r){return r.ok?r.json():null}).then(function(j){var v=j&&j.personaName;if(!v)return;v=String(v).replace(/[（(][^）)]*[）)]/g,"").trim()||String(v);var list=document.querySelectorAll("[data-persona]");for(var i=0;i<list.length;i++)list[i].textContent=v;}).catch(function(){});})();</script></html>`;
 }
 function organizeNote(saved: number, scanned: number, threshold: number, skipped = 0): string {
   if (!Number.isFinite(saved) || saved < 0) return "整理没有跑成。";
@@ -455,10 +474,64 @@ function organizeNote(saved: number, scanned: number, threshold: number, skipped
   if (skipped > 0) return head + "没有可自动保存的链；跳过了 " + skipped + " 组（含需要确认的工具或已失效的工具）。";
   return head + "没找到重复够 " + (threshold > 0 ? threshold : 3) + " 次的工具链，这次没有新技能。";
 }
-function renderUsage(skills: any[], stats: Record<string, { runs?: number; sources?: { chat: number; page: number } }>, calls: { name: string }[]): string {
+const REASON_LABEL: Record<string, string> = {
+  input: "参数", timeout: "超时", external: "外部", empty: "无结果",
+  skipped: "跳过", cancelled: "取消", blocked: "拦下", other: "其他",
+};
+type RunLog = { at: string; skill: string; status: RunStatus; source: "user" | "self" | "page" | "chat" };
+function dayKeyOf(date: Date) {
+  return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") + "-" + String(date.getDate()).padStart(2, "0");
+}
+function renderTrend(runs: RunLog[], days: number, skills: { id: string; name: string }[]): string {
+  const names = new Map(skills.map(skill => [skill.id, skill.name]));
+  const now = new Date();
+  const buckets = new Map<string, { ok: number; failed: number }>();
+  for (let back = days - 1; back >= 0; back -= 1) {
+    const day = new Date(now); day.setDate(day.getDate() - back);
+    buckets.set(dayKeyOf(day), { ok: 0, failed: 0 });
+  }
+  const perSkill = new Map<string, { ok: number; failed: number }>();
+  let ok = 0, failed = 0, older = 0;
+  for (const run of runs) {
+    const stamp = Date.parse(run.at);
+    if (!Number.isFinite(stamp)) continue;
+    const bucket = buckets.get(dayKeyOf(new Date(stamp)));
+    if (!bucket) { older += 1; continue; }
+    const item = perSkill.get(run.skill) ?? { ok: 0, failed: 0 };
+    if (run.status === "ok") { bucket.ok += 1; item.ok += 1; ok += 1; }
+    else { bucket.failed += 1; item.failed += 1; failed += 1; }
+    perSkill.set(run.skill, item);
+  }
+  const total = ok + failed;
+  const rate = total ? Math.round(ok / total * 100) : 0;
+  const peak = Math.max(1, ...Array.from(buckets.values()).map(item => item.ok + item.failed));
+  const bars = Array.from(buckets.entries()).map(([key, item]) => {
+    const all = item.ok + item.failed;
+    const height = all ? Math.max(6, Math.round(all / peak * 62)) : 2;
+    const okHeight = all ? Math.round(height * item.ok / all) : 0;
+    const title = key + "：成功 " + item.ok + " · 失败 " + item.failed;
+    return `<div class="space-bar" title="${escape(title)}"><div class="space-bar-fail" style="height:${height - okHeight}px"></div><div class="space-bar-ok" style="height:${okHeight}px"></div><span>${escape(key.slice(5).replace("-", "/"))}</span></div>`;
+  }).join("");
+  const rows = Array.from(perSkill.entries())
+    .sort((a, b) => (b[1].ok + b[1].failed) - (a[1].ok + a[1].failed))
+    .map(([id, item]) => {
+      const all = item.ok + item.failed;
+      return `<tr><td>${escape(names.get(id) ?? id)}</td><td>${all}</td><td>${item.ok}</td><td>${item.failed}</td><td>${Math.round(item.ok / all * 100)}%</td></tr>`;
+    }).join("");
+  const tab = (value: number, label: string) => `<a href="?days=${value}"${value === days ? ' class="on"' : ""}>${label}</a>`;
+  return `<section class="space-panel"><h2>使用趋势</h2>
+  <div class="space-trend-tabs">${tab(1, "今天")}${tab(7, "近 7 天")}${tab(30, "近 30 天")}</div>
+  <p class="space-muted">这段时间跑了 ${total} 次，成功 ${ok} 次，成功率 ${rate}%。${older ? "更早的 " + older + " 次没算进来。" : ""}每次运行都会记一条，从这张表启用那天起累积。</p>
+  <div class="space-bars">${bars}</div>
+  ${rows ? `<table class="space-trend-table"><thead><tr><th>技能</th><th>次数</th><th>成功</th><th>失败</th><th>成功率</th></tr></thead><tbody>${rows}</tbody></table>` : `<p class="space-muted">这段时间没有跑过技能。</p>`}
+  </section>`;
+}
+function renderUsage(skills: any[], stats: Record<string, { runs?: number; sources?: { chat?: number; page?: number; user?: number; self?: number } }>, calls: { name: string }[]): string {
   const runs = Object.values(stats).reduce((sum, item) => sum + (item.runs ?? 0), 0);
   const chat = Object.values(stats).reduce((sum, item) => sum + (item.sources?.chat ?? 0), 0);
   const page = Object.values(stats).reduce((sum, item) => sum + (item.sources?.page ?? 0), 0);
+  const byUser = Object.values(stats).reduce((sum, item) => sum + (item.sources?.user ?? 0), 0);
+  const bySelf = Object.values(stats).reduce((sum, item) => sum + (item.sources?.self ?? 0), 0);
   const cover = new Map<string, string>();
   for (const skill of skills) for (const step of skill.steps ?? []) if (step?.tool && !cover.has(step.tool)) cover.set(step.tool, String(skill.name ?? skill.id));
   const counts = new Map<string, number>();
@@ -470,7 +543,7 @@ function renderUsage(skills: any[], stats: Record<string, { runs?: number; sourc
   const top = [...counts.entries()].filter(([name]) => cover.has(name)).sort((a, b) => b[1] - a[1]).slice(0, 3);
   const pct = calls.length ? Math.round(covered / calls.length * 100) : 0;
   const lines = [
-    "技能累计跑过 " + runs + " 次 · 对话里 " + chat + " 次 · 页面 " + page + " 次。",
+    "技能累计跑过 " + runs + " 次 · 用户点名 " + byUser + " 次 · 勘自主 " + bySelf + " 次 · 页面 " + page + " 次" + (chat ? " · 旧记录 " + chat + " 次（未分类）" : "") + "。",
     calls.length
       ? "最近 " + calls.length + " 次工具调用里，" + covered + " 次（" + pct + "%）用的是已有技能里出现过的工具。"
       : "还没有工具调用记录。",
@@ -479,7 +552,10 @@ function renderUsage(skills: any[], stats: Record<string, { runs?: number; sourc
   return `<section class="space-panel"><h2>利用率</h2>${lines.map(line => `<p class="space-muted">${escape(line)}</p>`).join("")}</section>`;
 }
 function renderSkills(
-  skills: (ReturnType<typeof summarize> & { runs?: number; lastStatus?: RunStatus })[],
+  skills: (ReturnType<typeof summarize> & {
+    runs?: number; lastStatus?: RunStatus; okCount?: number; failedCount?: number;
+    lastAt?: string; reasons?: Record<string, number>;
+  })[],
   hints: string[] = [],
 ) {
   const hintPanel = hints.length
@@ -502,6 +578,18 @@ function renderSkills(
       ${skill.danger === "safe" ? "" : `<label class="space-run-flag"><input type="checkbox" name="confirmSideEffects"> 允许副作用步骤</label>`}
       <button class="space-save" type="submit">跑一次</button>
     </form>`;
+      const statsLine = typeof skill.runs === "number" && skill.runs > 0
+        ? (() => {
+            const rate = Math.round((skill.okCount ?? 0) / skill.runs * 100);
+            const reasons = Object.entries(skill.reasons ?? {})
+              .filter(([, n]) => Number(n) > 0)
+              .sort((a, b) => Number(b[1]) - Number(a[1]))
+              .slice(0, 2)
+              .map(([key, n]) => (REASON_LABEL[key] ?? key) + " " + n);
+            const when = skill.lastAt ? new Date(skill.lastAt).toLocaleString("zh-CN", { hour12: false }) : "";
+            return `<p class="space-muted">成功 ${skill.okCount ?? 0} / ${skill.runs}（${rate}%）${when ? " · 上次 " + escape(when) : ""}${reasons.length ? " · 失败原因：" + escape(reasons.join("、")) : ""}</p>`;
+          })()
+        : `<p class="space-muted">还没跑过，没有统计数据。</p>`;
       return `<article class="space-card">
       <h3>${escape(skill.name)}</h3>
       ${skill.description ? `<p>${escape(skill.description)}</p>` : ""}
@@ -509,8 +597,13 @@ function renderSkills(
         typeof skill.runs === "number"
           ? `<span class="space-badge ${skill.lastStatus === "ok" ? "ok" : "warn"}">跑过 ${skill.runs} 次${skill.lastStatus === "ok" ? "" : " · 上次 " + escape(String(skill.lastStatus))}</span>`
           : `<span class="space-badge">还没跑过</span>`
-      }${skill.sources && (skill.sources.chat || skill.sources.page) ? `<span class="space-badge">对话 ${skill.sources.chat} · 页面 ${skill.sources.page}</span>` : ""}${skill.revision ? `<span class="space-badge">rev ${skill.revision}</span>` : ""}<span class="space-muted">${escape(skill.id)}</span></p>
-      <p class="space-card-ops"><a class="btn space-secondary" href="/plugins/thinking-space/edit?id=${escape(skill.id)}">编辑步骤</a></p>
+      }${skill.sources && (skill.sources.user || skill.sources.self || skill.sources.page || skill.sources.chat) ? `<span class="space-badge">${[skill.sources.user ? "用户 " + skill.sources.user : "", skill.sources.self ? "自主 " + skill.sources.self : "", skill.sources.page ? "页面 " + skill.sources.page : "", skill.sources.chat ? "旧记录 " + skill.sources.chat : ""].filter(Boolean).join(" · ")}</span>` : ""}${skill.revision ? `<span class="space-badge">rev ${skill.revision}</span>` : ""}<span class="space-muted">${escape(skill.id)}</span></p>
+      ${statsLine}
+      <p class="space-card-ops"><a class="btn space-secondary" href="/plugins/thinking-space/edit?id=${escape(skill.id)}">编辑步骤</a>
+      <form method="post" action="/plugins/thinking-space/delete" style="display:inline;margin-left:8px" onsubmit="return confirm('删掉「${escape(skill.name)}」？这条技能的统计和待确认建议也会一起清掉，删了找不回来。')">
+      <input type="hidden" name="id" value="${escape(skill.id)}">
+      <button class="btn space-secondary" type="submit" style="color:#b3261e;border-color:#b3261e55">删除技能</button>
+      </form></p>
       <details><summary>看步骤与参数</summary>
       <p class="space-muted">输入参数：${escape(skill.params.map(param => (param.label ?? param.name) + " · " + param.type + (param.required ? " · 必填" : "") + (param.aliases?.length ? " · 别名 " + param.aliases.join("/") : "")).join("，") || "无")}</p>
       <ol class="space-steps">${skill.steps.map(step => `<li><code>${escape(step.id)}</code> · ${escape(step.plugin)} / ${escape(step.tool)}${step.available ? "" : " · <strong>工具不可用</strong>"}<pre>${escape(JSON.stringify(step.params, null, 2))}</pre></li>`).join("")}</ol>
@@ -518,7 +611,7 @@ function renderSkills(
     }).join("");
     const hint = kind === "single"
       ? "单步技能：调一次工具。适合查询、取数、发消息这类一下就能完的事。"
-      : "复合技能：多步串成一条链，勘一次调用跑完，中间不用多轮推理。";
+      : "复合技能：多步串成一条链，一次调用就能跑完，中间不用多轮推理。";
     return `<section class="space-panel"><h2>${kind === "single" ? "功能库" : "复合功能库"}</h2>
     <p class="space-muted" style="margin-bottom:14px">${hint}</p>
     ${cards || `<p class="space-empty">还没有${kind === "single" ? "功能" : "复合功能"}技能。</p>`}</section>`;
@@ -584,7 +677,8 @@ function renderReceipt(result?: RunResult) {
     result.trimmed.dropped.length ? `这条技能跑完自己缩短了：${result.trimmed.from} 步 → ${result.trimmed.to} 步（rev ${result.trimmed.revision}）。删掉的是 ${result.trimmed.dropped.map(item => escape(item.id + " " + item.tool)).join("、")}，因为它的结果没有被后面的步骤用到。` : "",
     result.trimmed.cut?.length ? `候选砍枝（rev ${result.trimmed.revision}）：${result.trimmed.cut.map(item => escape(item.key) + " 只留第一条，砍掉 " + item.droppedCount + " 个从没命中的候选").join("；")}。` : "",
   ].filter(Boolean).join(" ")}</p>` : ""}
-  ${result.relevance ? `<p><span class="space-badge ${result.relevance.status === "matched" ? "ok" : result.relevance.status === "weak" ? "warn" : result.relevance.status === "unrelated" ? "err" : ""}">相关性 ${escape(result.relevance.status)}</span><span class="space-muted">${escape(result.relevance.basis)}</span></p>` : ""}
+  ${result.trimSuggestion ? `<p><span class="space-badge warn">待确认</span><span class="space-muted">这次可以砍掉 ${result.trimSuggestion.dropped.map(item => escape(item.id + " " + item.tool)).join("、")}（结果没有被后面的步骤用到），技能 ${result.trimSuggestion.from} 步 → ${result.trimSuggestion.to} 步。还没动它；要砍就说一声「确认精简 ${escape(result.skill)}」。</span></p>` : ""}
+  ${result.relevance ? `<p><span class="space-badge" ${result.relevance.status === "matched" ? "ok" : result.relevance.status === "weak" ? "warn" : result.relevance.status === "unrelated" ? "err" : ""}">相关性 ${escape(result.relevance.status)}</span><span class="space-muted">${escape(result.relevance.basis)}</span></p>` : ""}
   <ol class="space-steps">${steps}</ol></section>`;
 }
 function readBody(req: any, limit = 8192): Promise<string> {
@@ -604,9 +698,19 @@ type CanvasState = { pid: number | null; error?: string };
 function renderSettings(settings: Settings, stats: { total: number; single: number; composite: number }, canvas: CanvasState) {
   return `<section class="space-panel">
   <h2>这是什么</h2>
-  <p>思维空间把工具链存成<strong>技能</strong>：单步的进功能库，多步串起来的进复合功能库。技能存在服务端，勘能直接读写，不用打开这个页面。</p>
-  <p>在画布页里画流程、看每个节点的接口和权限，画好回来存成技能，勘就能一句话调用，不必每次重新串一遍工具。</p>
-  <p class="space-muted">技能存下来，勘在对话里直接就能用；你也能在这页点「跑一次」。每一步的结果、耗时和失败原因都会留在回执里，按 runId 可回查一小时。</p>
+  <p>思维空间把工具链存成<strong>技能</strong>：单步的进功能库，多步串起来的进复合功能库。技能存在服务端，${PERSONA_SPAN}能直接读写，不用打开这个页面。</p>
+  <p>在画布页里画流程、看每个节点的接口和权限，画好回来存成技能，${PERSONA_SPAN}就能一句话调用，不必每次重新串一遍工具。</p>
+  <p class="space-muted">技能存下来，${PERSONA_SPAN}在对话里直接就能用；你也能在这页点「跑一次」。每一步的结果、耗时和失败原因都会留在回执里，按 runId 可回查一小时。</p>
+  <div class="space-rules">
+    <h3>技能守则</h3>
+    <ol>
+      <li><strong>先翻工具目录再动手</strong>：宿主已有的工具优先用，不重复造。</li>
+      <li><strong>不同插件的工具可以拼成一条链</strong>：搜索 → 读正文 → 模型提炼 → 出图，跨几个插件都允许。</li>
+      <li><strong>没有对应工具就手搓一个</strong>：给插件加注册，参数写清楚，有副作用就标 danger，别为了省事标 safe。</li>
+      <li><strong>手搓的工具也要能被观测</strong>：公开的返回值形状越清楚，后面自动连线越准。</li>
+      <li><strong>先跑一次再存下来</strong>：没跑通的链留在库里只会让下次调用踩空。</li>
+    </ol>
+  </div>
   <p class="space-row" style="margin-top:16px"><a class="space-open" href="${escape(settings.spaceUrl)}" target="_blank" rel="noopener">打开思维空间 →</a></p>
   <p class="space-muted" style="margin-top:8px">当前地址 ${escape(settings.spaceUrl)}</p>
   <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">
@@ -628,16 +732,16 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
   <h2>设置</h2>
   <form method="post" action="/plugins/thinking-space/settings">
     <label class="space-check"><input type="checkbox" name="allowUse"${settings.allowUse ? " checked" : ""}><span>允许使用整理好的技能</span></label>
-    <p class="space-muted">默认开。允许勘参考和使用已经保存的技能；关掉后保留技能，但不应使用。当前版本尚未提供技能执行器，此开关会随技能列表返回，供调用方遵守。</p>
+    <p class="space-muted">默认开。允许${PERSONA_SPAN}参考和使用已经保存的技能；关掉后保留技能，但不应使用。当前版本尚未提供技能执行器，此开关会随技能列表返回，供调用方遵守。</p>
     <label class="space-check" style="margin-top:24px"><input type="checkbox" name="autoOrganize"${settings.autoOrganize ? " checked" : ""}><span>自动整理思维</span></label>
-    <p class="space-muted">开着时，勘在对话里会自己把反复用到的一串动作整理成技能存进来，不必每次开口。它不会在没人说话时自己醒来——那需要自主唤醒，还没有。关掉之后只在明确要求时才保存。默认开。</p>
+    <p class="space-muted">开着时，${PERSONA_SPAN}在对话里会自己把反复用到的一串动作整理成技能存进来，不必每次开口。它不会在没人说话时自己醒来——那需要自主唤醒，还没有。关掉之后只在明确要求时才保存。默认开。</p>
 
     <label class="space-check" style="margin-top:18px"><input type="checkbox" name="learnOnRequest"${settings.learnOnRequest ? " checked" : ""}><span>听一句话就学</span></label>
-    <p class="space-muted">默认开。开着时你只要说一句「勘，这个技能学会了吗？」，我就会去看刚才反复做的动作，整理成技能存进来，再回你存了什么。它自己不会先跑，还是要你开口。关掉之后，只在设置页点「立即整理」，或者我明确被要求时才整理。</p>
+    <p class="space-muted">默认开。开着时你只要说一句「${PERSONA_SPAN}，这个技能学会了吗？」，我就会去看刚才反复做的动作，整理成技能存进来，再回你存了什么。它自己不会先跑，还是要你开口。关掉之后，只在设置页点「立即整理」，或者我明确被要求时才整理。</p>
 
     <div class="space-field">听哪一句话</div>
     <input type="text" name="triggerPhrase" maxlength="80" value="${escape(settings.triggerPhrase)}">
-    <p class="space-muted" style="margin-top:6px">出厂是「XXX，你学会了吗？」。XXX 会按当前人格名显示，换成勘就是「勘，你学会了吗？」。你可以改成自己顺口的说法，只要意思还是「去把刚才反复做的动作学下来」。</p>
+    <p class="space-muted" style="margin-top:6px">出厂是「XXX，你学会了吗？」。XXX 会按当前人格名显示，换成${PERSONA_SPAN}就是「${PERSONA_SPAN}，你学会了吗？」。你可以改成自己顺口的说法，只要意思还是「去把刚才反复做的动作学下来」。</p>
 
     <div class="space-field">连续出现几次才算一条链</div>
     <input type="number" name="organizeThreshold" min="2" max="10" value="${settings.organizeThreshold}">
@@ -701,7 +805,7 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
   </script>
 </section>`;
 }
-function summarize(skill: Skill, catalog: Map<string, ToolContract>, stat?: { runs: number; lastStatus: RunStatus; sources?: { chat: number; page: number } }) {
+function summarize(skill: Skill, catalog: Map<string, ToolContract>, stat?: { runs: number; lastStatus: RunStatus; sources?: { chat?: number; page?: number; user?: number; self?: number } }) {
   const steps = skill.steps.map(step => ({ ...step, available: catalog.get(step.tool)?.plugin === step.plugin }));
   let status = "仅声明";
   try { validateSkill(skill.id, skill, catalog); }
@@ -735,7 +839,43 @@ export function apply(ctx: Context) {
       return items.length ? "现成技能：" + items.join("、") + "。连着几步的事先用它们，比逐个调工具少一轮对话。" : "";
     } catch { return ""; }
   })();
-  const catalogByName = async () => new Map((await ctx.tools.catalog()).map(tool => [tool.name, tool]));
+  const LLM_TOOL = "llm";
+const llmContract = {
+  name: LLM_TOOL, plugin: "thinking-space", description: "把上一步的结果交给模型提炼成一段文字。",
+  danger: "safe",
+  inputSchema: {
+    type: "object",
+    properties: { prompt: { type: "string" }, system: { type: "string" }, max_tokens: { type: "integer" }, model: { type: "string" } },
+    required: ["prompt"], additionalProperties: false,
+  },
+} as any;
+
+async function callLlm(plan: JsonObject) {
+  const prompt = typeof plan.prompt === "string" ? plan.prompt.trim() : "";
+  if (!prompt) throw new Error("模型步骤缺少 prompt。");
+  const wanted = typeof plan.model === "string" ? plan.model : "";
+  const choices = (() => {
+    try { return (ctx.models?.list?.("chat") ?? []).filter((item: any) => item.callable !== false); }
+    catch { return [] as any[]; }
+  })();
+  const pick = (wanted && choices.find((item: any) => item.id === wanted || item.model === wanted || item.name === wanted))
+    ?? choices[0];
+  if (wanted && !pick) throw new Error("没找到模型 " + wanted + "。");
+  if (!pick) throw new Error("没有可用的对话模型，先在模型配置里加一个。");
+  const messages: any[] = [];
+  if (typeof plan.system === "string" && plan.system.trim()) messages.push({ role: "system", content: String(plan.system) });
+  messages.push({ role: "user", content: prompt });
+  const maxTokens = Number.isInteger(plan.max_tokens) ? Number(plan.max_tokens) : 800;
+  const reply = await ctx.llm.chat({ model: pick.id, messages, max_tokens: maxTokens } as any);
+  const text = String(reply?.text ?? "").trim();
+  if (!text) throw new Error("模型返回空内容（finish_reason=" + (reply?.finish_reason ?? "未知") + "）。");
+  return { ok: true, data: { text, model: pick.id } };
+}
+
+const catalogByName = async () => new Map([
+  ...(await ctx.tools.catalog()).map(tool => [tool.name, tool] as const),
+  [LLM_TOOL, llmContract] as const,
+]);
   async function readStore(): Promise<Store> {
     const data = await ctx.config.read<Store>(storeFile);
     if (record(data) && !Object.keys(data).length) return { schemaVersion: 1, skills: [] };
@@ -1042,6 +1182,7 @@ export function apply(ctx: Context) {
   }
   /** 插件工具大多没写 displayName，这里给常见工具一个中文名兜底，自动命名才不至于露出一串下划线。 */
   const TOOL_LABELS: Record<string, string> = {
+  "llm": "模型提炼",
     "ledger_today": "今天用量",
     "usage_today": "最近用量",
     "budget_set": "设预算",
@@ -1113,7 +1254,7 @@ export function apply(ctx: Context) {
   const statsFile = "stats.json";
   type Reason = "input" | "timeout" | "external" | "empty" | "skipped" | "cancelled" | "blocked" | "other";
   type Stat = { runs: number; ok: number; failed: number; streak: number; lastAt: string; lastStatus: RunStatus;
-    sources?: { chat: number; page: number };
+    sources?: { chat?: number; page?: number; user?: number; self?: number };
     reasons?: Record<Reason, number>; candidates?: Record<string, { runs: number; first: number }> };
   function classifyFailure(status: RunStatus, error: string): Reason {
     if (status === "blocked") return "blocked";
@@ -1124,6 +1265,31 @@ export function apply(ctx: Context) {
     if (/没有搜索结果|无搜索结果|候选值全都取不到|没有有效链接|没有可试的输入|这一步没有可试/.test(error)) return "empty";
     if (/读取失败|抓不到|打不开|unsupported_content|access_blocked|network|ECONN|ENOTFOUND|HTTP \d|业务错误|拒绝/.test(error)) return "external";
     return "other";
+  }
+  const runsFile = "runs.json";
+  async function readRuns(): Promise<RunLog[]> {
+    try {
+      const data = await ctx.config.read<RunLog[]>(runsFile);
+      return Array.isArray(data) ? data.filter(item => item && typeof item.at === "string") : [];
+    } catch { return []; }
+  }
+  async function appendRun(skill: string, status: RunStatus, source: "user" | "self" | "page") {
+    const list = await readRuns();
+    list.push({ at: new Date().toISOString(), skill, status, source });
+    const floor = Date.now() - 90 * 86400000;
+    const kept = list.filter(item => { const stamp = Date.parse(item.at); return Number.isFinite(stamp) ? stamp >= floor : false; });
+    await ctx.config.save(runsFile, kept.slice(-2000));
+  }
+  /** 第一次用的时候把每条技能最后一次运行补进去，那一行是真实发生过的。 */
+  async function readRunsSeeded(): Promise<RunLog[]> {
+    const list = await readRuns();
+    if (list.length) return list;
+    const stats = await readStats();
+    const seeded = Object.entries(stats)
+      .filter(([, stat]) => stat && stat.lastAt)
+      .map(([skill, stat]) => ({ at: stat.lastAt as string, skill, status: (stat.lastStatus ?? "ok") as RunStatus, source: "chat" as const }));
+    if (seeded.length) { try { await ctx.config.save(runsFile, seeded); } catch { /* 建档失败就下次再试 */ } }
+    return seeded;
   }
   async function readStats(): Promise<Record<string, Stat>> {
     try {
@@ -1152,7 +1318,7 @@ export function apply(ctx: Context) {
       await ctx.config.save(failuresFile, list);
     } catch { /* 失败记录写不进去，不影响这次执行 */ }
   }
-  async function bumpStat(skillId: string, status: RunStatus, error = "", source: "chat" | "page" = "chat") {
+  async function bumpStat(skillId: string, status: RunStatus, error = "", source: "user" | "self" | "page" = "self") {
     try {
       const stats = await readStats();
       const stat: Stat = stats[skillId] ?? { runs: 0, ok: 0, failed: 0, streak: 0, lastAt: "", lastStatus: status,
@@ -1172,17 +1338,21 @@ export function apply(ctx: Context) {
         stat.reasons[classifyFailure(status, error)] += 1;
         await recordFailure(skillId, status, error);
       }
-      if (!stat.sources) stat.sources = { chat: 0, page: 0 };
+      if (!stat.sources) stat.sources = {};
       stat.sources[source] = (stat.sources[source] ?? 0) + 1;
       stat.lastAt = new Date().toISOString();
       stat.lastStatus = status;
       stats[skillId] = stat;
       await ctx.config.save(statsFile, stats);
+      try { await appendRun(skillId, status, source); } catch { /* 趋势日志写不进去不影响这次执行 */ }
     } catch { /* 统计写不进去不影响这次执行 */ }
   }
   // 跑熟了自己变短：跑通一次后回头看这条链，有没有哪一步纯属白跑。
   // 判定保守：只删「自己跑成了、输出没有被后面任何一步引用、不是最后一步、工具不需要确认」的中间步。
-  async function autoTrim(skillId: string, steps: StepResult[], startRevision: number): Promise<TrimNote | null> {
+  type TrimPlan = { note: TrimNote; next: Skill };
+  const trimSuggestions = new Map<string, TrimPlan>();
+  // 只算不写：跑通一次后回头看有没有哪一步纯属白跑。建议先攒着，等确认再动技能。
+  async function planTrim(skillId: string, steps: StepResult[], startRevision: number): Promise<TrimPlan | null> {
     try {
       const store = await readStore();
       const skill = store.skills.find(item => item.id === skillId);
@@ -1206,13 +1376,27 @@ export function apply(ctx: Context) {
       const rebuilt = keep.map((step, index) => ({ ...step, next: keep[index + 1]?.id ?? null }));
       const next: Skill = { ...skill, steps: rebuilt, revision: startRevision + 1, danger: dangerFor(rebuilt, catalog, skill.danger) };
       validateSkill(next.id, next, catalog);
-      const updated = { ...store, skills: store.skills.map(item => item.id === skill.id ? next : item) };
-      await ctx.config.save(storeFile, updated);
-      return { from: skill.steps.length, to: rebuilt.length, dropped, revision: Number(next.revision) };
+      return { note: { from: skill.steps.length, to: rebuilt.length, dropped, revision: Number(next.revision) }, next };
     } catch (error) {
       console.warn("精简没做成：" + (error instanceof Error ? error.message : String(error)));
       return null;
     }
+  }
+  // 确认之后才真改。写之前再看一眼 revision，中间被改过就作废。
+  async function applyTrim(skillId: string): Promise<TrimNote | string> {
+    const plan = trimSuggestions.get(skillId);
+    if (!plan) return "没有待确认的精简建议。先跑一次技能，跑通了才会攒出建议。";
+    const store = await readStore();
+    const current = store.skills.find(item => item.id === skillId);
+    if (!current) return "这条技能已经不在了。";
+    if (Number(current.revision) !== Number(plan.note.revision) - 1) {
+      trimSuggestions.delete(skillId);
+      return "这条技能在你确认之前被改过（现在 rev " + current.revision + "），这条建议作废，没有动它。";
+    }
+    const updated = { ...store, skills: store.skills.map(item => item.id === skillId ? plan.next : item) };
+    await ctx.config.save(storeFile, updated);
+    trimSuggestions.delete(skillId);
+    return plan.note;
   }
   // $try 候选砍枝的统计：记每个「步骤.参数」跑了多少次、其中多少次第一条就命中。
   async function bumpCandidates(skillId: string, steps: StepResult[]) {
@@ -1267,6 +1451,7 @@ export function apply(ctx: Context) {
       const next: Skill = { ...skill, steps: rebuilt, revision: startRevision + 1, danger: dangerFor(rebuilt, catalog, skill.danger) };
       validateSkill(next.id, next, catalog);
       await ctx.config.save(storeFile, { ...store, skills: store.skills.map(item => item.id === skill.id ? next : item) });
+      console.info("砍枝 " + skill.id + "：" + cuts.map(cut => cut.key + " 保留首条、砍掉 " + cut.droppedCount + " 个候选").join("；") + "（rev " + skill.revision + "→" + next.revision + "）");
       // 砍完清掉这几条计数，避免下次重复触发
       const left = { ...cands };
       for (const cut of cuts) delete left[cut.key];
@@ -1291,7 +1476,33 @@ export function apply(ctx: Context) {
     if (reasons.other > 0) parts.push(reasons.other + " 次其他原因");
     return parts.join("，");
   }
-  function hintsFor(items: { id: string; name: string }[], stats: Record<string, Stat>): string[] {
+  function goalTerms(text: string): string[] {
+  const raw = String(text ?? "").toLowerCase();
+  const out = new Set<string>();
+  for (const piece of raw.match(/[a-z0-9_]+/g) ?? []) if (piece.length > 1) out.add(piece);
+  for (const piece of raw.match(/[\u4e00-\u9fa5]{2,}/g) ?? []) {
+    out.add(piece);
+    for (let i = 0; i + 2 <= piece.length; i += 1) out.add(piece.slice(i, i + 2));
+  }
+  return [...out];
+}
+function rankByGoal(items: any[], goal: string) {
+  const terms = goalTerms(goal);
+  const scored = items.map(item => {
+    const hay = [item.name, item.description, item.useWhen, item.notFor, item.outputs].filter(Boolean).join(" ").toLowerCase();
+    const hits = terms.filter(term => hay.includes(term));
+    return { item, hits, score: hits.length };
+  }).filter(row => row.score > 0);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(({ item, hits, score }) => ({
+    id: item.id, name: item.name, revision: item.revision, danger: item.danger,
+    reason: "命中：" + [...new Set(hits)].slice(0, 4).join("、"),
+    requiredParams: (item.params ?? []).filter((param: any) => param.required).map((param: any) => param.name),
+    ...(item.useWhen ? { useWhen: item.useWhen } : {}),
+    score,
+  }));
+}
+function hintsFor(items: { id: string; name: string }[], stats: Record<string, Stat>): string[] {
     const hints: string[] = [];
     for (const item of items) {
       const stat = stats[item.id];
@@ -1328,7 +1539,9 @@ export function apply(ctx: Context) {
         else skills[index] = skill;
         signal?.throwIfAborted();
         await ctx.config.save(storeFile, { schemaVersion: 1, skills });
-        return { status: "ok", id: skill.id, created: index < 0, revision: skill.revision };
+        const base = String(settings.spaceUrl || "").trim().replace(/\/+$/, "");
+        const canvasUrl = base ? base + "/?inject=" + Buffer.from(JSON.stringify(skill), "utf8").toString("base64url") : null;
+        return { status: "ok", id: skill.id, created: index < 0, revision: skill.revision, canvasUrl };
       } catch (error) {
         return { status: "blocked", error: error instanceof Error ? error.message : "未能保存技能。" };
       }
@@ -1353,15 +1566,28 @@ export function apply(ctx: Context) {
   });
   ctx.tools.register({
     name: "space_skills", displayName: "列出思维空间技能", danger: "safe",
-    description: "列出服务端技能的名称、说明、步数、权限和验证状态，并返回自动整理和允许使用技能开关状态。allowUse 为 false 时不得使用已保存技能；当前版本只提供存储，尚无技能执行器。",
-    schema: { type: "object", properties: {}, additionalProperties: false },
-    async run() {
+    description: "列出服务端技能的名称、说明、步数、权限和验证状态，并返回自动整理和允许使用技能开关状态。allowUse 为 false 时不得使用已保存技能。给了 query 就按目标检索，最多返回三个候选。",
+    schema: { type: "object", properties: {
+      query: { type: "string", description: "用一句话描述要办的事，按目标匹配技能；省略则列出全部" },
+    }, additionalProperties: false },
+    async run(args) {
+      const goal = typeof args?.query === "string" && args.query.trim() ? args.query.trim() : "";
       const [skills, settings, stats, calls] = await Promise.all([list(), readSettings(), readStats(), readCalls()]);
-      const items = skills.map(({ id, name, description, kind, stepCount, danger, status, revision }) => {
+      const items = skills.map(({ id, name, description, kind, stepCount, danger, status, revision, useWhen, notFor, outputs }) => {
         const stat = stats[id];
-        return { id, name, description, kind, stepCount, danger, status, revision,
+        return { id, name, description, kind, stepCount, danger, status, revision, useWhen, notFor, outputs,
           ...(stat ? { runs: stat.runs, lastStatus: stat.lastStatus, lastAt: stat.lastAt, failed: stat.failed, reasons: stat.reasons ?? null } : {}) };
       });
+      if (goal) {
+        const ranked = rankByGoal(items, goal).slice(0, 3);
+        if (!ranked.length) return { status: "ok", query: goal, candidates: [],
+          note: "没有匹配的技能。可以直接调工具，或者用 space_draft 起个草稿。" };
+        const risky = ranked.filter(item => item.danger !== "safe");
+        const riskNote = risky.length
+          ? "其中有需要确认的步骤：" + risky.map(item => item.name + "（" + item.danger + "）").join("、") + "。跑的时候要传 confirmSideEffects:true。"
+          : "只给匹配理由和必填参数；要看步骤再按 id 展开。";
+        return { status: "ok", query: goal, candidates: ranked, note: riskNote };
+      }
       const out: Record<string, unknown> = { status: "ok", allowUse: settings.allowUse,
         autoOrganize: settings.autoOrganize, allowRiskyChains: settings.allowRiskyChains, learnOnRequest: settings.learnOnRequest,
         triggerPhrase: settings.triggerPhrase, skills: items };
@@ -1383,7 +1609,7 @@ export function apply(ctx: Context) {
   });
   ctx.tools.register<{ tools: string[]; name?: string; description?: string }>({
     name: "space_draft", displayName: "按工具序列起技能草稿", danger: "safe",
-    description: "给一串工具名，按顺序生成技能草稿：自动填归属插件、next 链，并用真校验器预检。只返回草稿，不保存。保存仍需 space_skill_save。",
+    description: "给一串工具名，按顺序生成技能草稿：自动填归属插件、next 链，并用真校验器预检。只返回草稿不保存，保存用 space_skill_save；建技能的守则见 space_skill_save 的说明。",
     schema: { type: "object", additionalProperties: false, required: ["tools"], properties: {
       tools: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 20 },
       name: { type: "string" }, description: { type: "string" },
@@ -1484,7 +1710,7 @@ export function apply(ctx: Context) {
   });
   ctx.tools.register<{ id: string; spec: unknown }>({
     name: "space_skill_save", displayName: "保存思维空间技能", danger: "ask",
-    description: "新建或覆盖一条技能定义。spec 包含 schemaVersion、name、kind、params 和按顺序排列的 steps。此操作只保存定义。",
+    description: "新建或覆盖一条技能定义。spec 包含 schemaVersion、name、kind、params 和按顺序排列的 steps。此操作只保存定义。建技能前先看 space_skills 和工具目录，能拼现成的就不造；不同插件的工具可以串在同一条链里；缺工具就注册一个，参数写清、有副作用标 danger；链没跑通别急着存。",
     schema: { type: "object", additionalProperties: false, required: ["id", "spec"],
       properties: { id: { type: "string" }, spec: {
         type: "object", required: ["schemaVersion", "name", "kind", "params", "steps"],
@@ -1504,7 +1730,7 @@ export function apply(ctx: Context) {
   });
   // ---- 第二阶段：真执行 ----
   let runSeq = 0;
-  ctx.tools.register<{ id: string; params?: JsonObject; confirmSideEffects?: boolean }>({
+  ctx.tools.register<{ id: string; params?: JsonObject; confirmSideEffects?: boolean; via?: "user" | "self" }>({
     name: "space_run", displayName: "运行思维空间技能", danger: "ask",
     description: "按技能定义依次执行各步骤，参数中的 ${名称} 与 ${步骤id.字段路径} 会在运行时填成真实值。只读链直接跑；链里含写文件、执行命令、发图、发声等副作用步骤时，须显式传 confirmSideEffects:true。失败分六态：ok 正常；empty 上游无数据、后续步骤未启动；failed 可重试；uncertain 结果未知不得自动重试；blocked 缺前置条件；skipped 这一步没结果但后面不依赖它，已继续。运行期间技能被改过时会带 staleDefinition。",
     schema: { type: "object", additionalProperties: false, required: ["id"],
@@ -1512,6 +1738,7 @@ export function apply(ctx: Context) {
         id: { type: "string" },
         params: { type: "object" },
         confirmSideEffects: { type: "boolean", description: "链中含副作用步骤时必须显式为 true。" },
+        via: { type: "string", enum: ["user", "self"], description: "谁发起的，只用于统计：用户明确点名这条技能填 user；勘自己判断该用填 self（默认）。" },
       } },
     async run(args, session) {
       const runId = "run_" + Date.now().toString(36) + "_" + (++runSeq);
@@ -1583,6 +1810,12 @@ export function apply(ctx: Context) {
             const t0 = Date.now();
             input = plan;
             try {
+              if (step.tool === LLM_TOOL) {
+                raw = await withTimeout(callLlm(plan), stepTimeout, LLM_TOOL);
+                elapsedMs = Date.now() - t0;
+                hitIndex = 0;
+                break;
+              }
               raw = await withTimeout(ctx.tools.call(step.tool, plan, {
                 id: runId, permission: "full", origin: { plugin: "thinking-space", action: step.id },
               } as any), stepTimeout, step.tool);
@@ -1663,7 +1896,7 @@ export function apply(ctx: Context) {
       // 全部步骤都被跳过，等于一步都没干成：不能报 skipped 让人以为没事，抬成 failed
       const allSkipped = steps.length > 0 && steps.every(item => item.status === "skipped");
       if (allSkipped) lastStatus = "failed";
-      await bumpStat(skill.id, lastStatus, steps[steps.length - 1]?.error ?? "", (session as any)?.origin?.action === "web_run" ? "page" : "chat");
+      await bumpStat(skill.id, lastStatus, steps[steps.length - 1]?.error ?? "", (session as any)?.origin?.action === "web_run" ? "page" : (args?.via === "user" ? "user" : "self"));
       const result: RunResult & { staleDefinition?: boolean; definitionRevision?: number } = { status: lastStatus, runId, skill: skill.id, steps, ...(relevance ? { relevance } : {}) };
       if (allSkipped) result.error = "所有步骤都没跑成，这条技能什么都没做。第一步：" + (steps[0]?.error ?? "没有给出原因");
       else if (lastStatus === "empty") result.error = "上游没有产出数据，后续步骤没有启动。";
@@ -1681,9 +1914,14 @@ export function apply(ctx: Context) {
       remember(runId, result);
       if (lastStatus === "ok") {
         await bumpCandidates(skill.id, steps);
-        const note = await autoTrim(skill.id, steps, startRevision);
-        const cuts = await cutCandidates(skill.id, steps, note?.revision ?? startRevision);
-        if (note) { if (cuts.length) note.cut = cuts; result.trimmed = note; remember(runId, result); }
+        const plan = await planTrim(skill.id, steps, startRevision);
+        const cuts = await cutCandidates(skill.id, steps, plan?.note.revision ?? startRevision);
+        if (plan) {
+          if (cuts.length) plan.note.cut = cuts;
+          trimSuggestions.set(skill.id, plan);
+          result.trimSuggestion = plan.note;
+          remember(runId, result);
+        }
         else if (cuts.length) {
           const latest = (await readStore()).skills.find(item => item.id === skill.id);
           const from = latest?.steps.length ?? 0;
@@ -1692,6 +1930,19 @@ export function apply(ctx: Context) {
         }
       }
       return result;
+    },
+  });
+  ctx.tools.register<{ skill: string; apply: boolean }>({
+    name: "space_trim", displayName: "确认精简技能", danger: "ask",
+    description: "技能跑通后如果发现某一步白跑，会攒一条精简建议，不会自己改。用这个确认：apply 为 true 才真删那几步；false 表示这次先不动，建议丢弃。",
+    schema: { type: "object", additionalProperties: false, required: ["skill", "apply"], properties: { skill: { type: "string", description: "技能 id" }, apply: { type: "boolean", description: "true 应用建议，false 丢弃" } } },
+    async run(args) {
+      const id = String(args?.skill ?? "").trim();
+      if (!id) return { status: "blocked", error: "缺少技能 id。" };
+      if (args?.apply === false) { trimSuggestions.delete(id); return { status: "ok", applied: false, message: "建议已丢弃，技能没有改动。" }; }
+      const out = await applyTrim(id);
+      if (typeof out === "string") return { status: "blocked", error: out };
+      return { status: "ok", applied: true, trimmed: out, message: "已按建议精简：" + out.from + " 步 → " + out.to + " 步（rev " + out.revision + "）。" };
     },
   });
   ctx.tools.register<{ runId?: string }>({
@@ -1796,6 +2047,7 @@ export function apply(ctx: Context) {
       const ran = query.get("ran") ?? "";
       const failed = query.get("ran_err") ?? "";
       const organized = query.get("organized");
+      const deleted = query.get("deleted") ?? "";
       const receipt = ran
         ? renderReceipt(traces.get(ran))
         : failed
@@ -1804,12 +2056,17 @@ export function apply(ctx: Context) {
       const [skills, stats, settings] = await Promise.all([list(), readStats(), readSettings()]);
       const withStats = skills.map((skill) => {
         const stat = stats[skill.id];
-        return { ...skill, ...(stat ? { runs: stat.runs, lastStatus: stat.lastStatus, sources: stat.sources } : {}) };
+        return { ...skill, ...(stat ? { runs: stat.runs, lastStatus: stat.lastStatus, sources: stat.sources, okCount: stat.ok ?? 0, failedCount: stat.failed ?? 0, lastAt: stat.lastAt ?? "", reasons: stat.reasons ?? {} } : {}) };
       });
+      const trendDays = (() => { const raw = Number(query.get("days") ?? 7); return raw === 1 || raw === 7 || raw === 30 ? raw : 7; })();
+      const trendPanel = renderTrend(await readRunsSeeded(), trendDays, skills);
       const hints = settings.autoOrganize ? hintsFor(withStats, stats) : [];
             const organizePanel = organized === null ? "" : `<section class="space-panel"><h2>整理结束</h2><p>${escape(organizeNote(Number(organized), Number(query.get("scanned") ?? 0), Number(query.get("threshold") ?? 0), Number(query.get("skipped") ?? 0)))}</p></section>`;
       const organizeButton = `<form method="post" action="/plugins/thinking-space/organize" style="display:inline-flex;margin:0 0 0 10px"><button class="btn space-secondary" type="submit">立即整理</button></form>`;
-      const body = `<div class="space-toolbar"><a class="btn space-secondary" href="${pagePath}">← 返回设置</a>${organizeButton}</div>` + receipt + organizePanel + renderUsage(withStats, stats, await readCalls()) + renderSkills(withStats, hints);
+      const deletedPanel = deleted
+        ? `<section class="space-panel"><h2>删掉了</h2><p>「${escape(deleted)}」已经从技能库里移除，统计和待确认建议一并清掉。</p></section>`
+        : "";
+      const body = `<div class="space-toolbar"><a class="btn space-secondary" href="${pagePath}">← 返回设置</a>${organizeButton}</div>` + receipt + organizePanel + deletedPanel + trendPanel + renderUsage(withStats, stats, await readCalls()) + renderSkills(withStats, hints);
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html("思维空间", body));
     } catch {
@@ -1949,6 +2206,28 @@ export function apply(ctx: Context) {
       res.end();
     }
   });
+  ctx.web.api("/plugins/thinking-space/delete", async (req: any, res: any) => {
+    const back = pagePath + "space";
+    try {
+      const form = new URLSearchParams(await readBody(req, 65536));
+      const id = (form.get("id") ?? "").trim();
+      if (!id) throw new Error("没有给出要删的技能。");
+      const store = await readStore();
+      const found = store.skills.find(item => item.id === id);
+      if (!found) throw new Error("找不到这条技能，可能已经被删了。");
+      await ctx.config.save(storeFile, { ...store, skills: store.skills.filter(item => item.id !== id) });
+      trimSuggestions.delete(id);
+      try {
+        const stats = await readStats();
+        if (Object.hasOwn(stats, id)) { delete stats[id]; await ctx.config.save(statsFile, stats); }
+      } catch { /* 统计清不掉不影响删除 */ }
+      res.writeHead(303, { Location: back + "?deleted=" + encodeURIComponent(found.name || id) });
+      res.end();
+    } catch (error) {
+      res.writeHead(303, { Location: back + "?ran_err=" + encodeURIComponent(error instanceof Error ? error.message : "删除失败。") });
+      res.end();
+    }
+  });
   ctx.web.api("/plugins/thinking-space/settings", async (req: any, res: any) => {
     try {
       const form = new URLSearchParams(await readBody(req));
@@ -2039,6 +2318,80 @@ export function apply(ctx: Context) {
       res.end();
     }
   });
+  ctx.web.page("/plugins/thinking-space/skill", async (req: any, res: any) => {
+    const json = (status: number, body: unknown) => {
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    try {
+      const url = new URL(String(req.url ?? "/"), "http://localhost");
+      const id = String(url.searchParams.get("id") ?? "").trim();
+      if (!id) { json(400, { ok: false, error: "缺少 id 参数。" }); return; }
+      const store = await readStore();
+      const skill = store.skills.find((item) => item && item.id === id);
+      if (!skill) { json(404, { ok: false, error: "没有这条技能：" + id }); return; }
+      json(200, { ok: true, skill });
+    } catch (error) {
+      json(500, { ok: false, error: error instanceof Error ? error.message : "读取失败。" });
+    }
+  }, { title: "技能定义", navigation: false });
+  ctx.web.page("/plugins/thinking-space/tools", async (_req: any, res: any) => {
+    const json = (status: number, body: unknown) => {
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    try {
+      const list = await ctx.tools.catalog();
+      const tools = (Array.isArray(list) ? list : []).map((tool: any) => ({
+        name: String(tool?.name ?? ""),
+        displayName: String(tool?.displayName ?? tool?.name ?? ""),
+        category: String(tool?.category ?? ""),
+        plugin: String(tool?.plugin ?? ""),
+        danger: String(tool?.danger ?? "ask"),
+        inputSchema: tool?.inputSchema ?? null,
+        visibleInputs: Array.isArray(tool?.visibleInputs) ? tool.visibleInputs : [],
+        outputSchema: tool?.outputSchema ?? null,
+        visibleOutputs: Array.isArray(tool?.visibleOutputs) ? tool.visibleOutputs : [],
+      })).filter((tool: any) => tool.name);
+      json(200, { ok: true, count: tools.length, tools });
+    } catch (error) {
+      json(500, { ok: false, error: error instanceof Error ? error.message : "读取工具目录失败。" });
+    }
+  }, { title: "工具目录", navigation: false });
+  ctx.web.page("/plugins/thinking-space/flows", async (req: any, res: any) => {
+    try {
+      const stored = await ctx.config.read<{ savedAt?: string; snapshot?: unknown }>(flowsFile);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ ok: true, savedAt: stored?.savedAt ?? null, snapshot: stored?.snapshot ?? null }));
+    } catch (error) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : "读取失败。" }));
+    }
+  }, { title: "画布快照", navigation: false });
+  ctx.web.api("/plugins/thinking-space/flows", async (req: any, res: any) => {
+    const json = (status: number, body: unknown) => {
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    try {
+      const method = String(req.method ?? "GET").toUpperCase();
+      if (method === "GET") {
+        const stored = await ctx.config.read<{ savedAt?: string; snapshot?: unknown }>(flowsFile);
+        return json(200, { ok: true, savedAt: stored?.savedAt ?? null, snapshot: stored?.snapshot ?? null });
+      }
+      if (method !== "POST") return json(405, { ok: false, error: "只支持 GET 和 POST。" });
+      const raw = await readBody(req, 4 * 1024 * 1024);
+      const parsed = JSON.parse(raw || "{}");
+      const snapshot = parsed?.snapshot;
+      if (!snapshot || typeof snapshot !== "object") throw new Error("缺少 snapshot 字段。");
+      const savedAt = typeof (snapshot as any).savedAt === "string" ? (snapshot as any).savedAt : new Date().toISOString();
+      await ctx.config.save(flowsFile, { savedAt, snapshot });
+      return json(200, { ok: true, savedAt, bytes: Buffer.byteLength(raw, "utf8") });
+    } catch (error) {
+      return json(400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   ctx.web.page("/plugins/thinking-space/settings", async (req: any, res: any) => {
     try {
       const query = new URL(req.url ?? "/", "http://localhost").searchParams;

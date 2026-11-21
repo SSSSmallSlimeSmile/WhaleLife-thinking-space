@@ -39,7 +39,7 @@
 
 ```
 plugins/thinking-space/     插件本体（放进宿主 plugins/ 就能用）
-  index.ts                  单文件，约 105 KB
+  index.ts                  单文件，约 152 KB
   plugin.yaml               id / depends
   README.md                 插件级说明（工具表、路由表、坑）
   LICENSE  LICENSE-ADDITIONAL  NOTICE.md  THIRD_PARTY_NOTICES.md
@@ -72,16 +72,18 @@ README.md                   本文件
 
 ---
 
-## 四、六个工具
+## 四、八个工具
 
 | 工具 | 用途 |
 |---|---|
-| `space_skills()` | 列出技能：ID、名称、步数、权限、状态、跑过几次、上次成败、版本号 |
+| `space_skills({ query? })` | 列出技能：ID、名称、步数、权限、状态、跑过几次、上次成败、版本号。给了 query 就按目标匹配，最多返回三个候选，带匹配理由、必填参数、`useWhen`，危险级不是 safe 的会单独提示 |
 | `space_skill_save({ id, spec })` | 新建或覆盖同 ID 的技能，校验不过返回 `blocked` 和原因 |
 | `space_draft({ name, tools })` | 给一串工具名，自动查归属插件、连 `next` 链，生成草稿并预校验（不保存） |
-| `space_run({ id, params, confirmSideEffects })` | 真跑一遍，返回逐步回执 |
+| `space_run({ id, params, confirmSideEffects, via })` | 真跑一遍，返回逐步回执。via 记来源：`user`（用户明确点名这条技能）/ `self`（自己判断该用，默认）|
 | `space_trace({ runId })` | 按 runId 取回一次运行的完整步骤（内存留一小时） |
-| `space_organize({ force })` | 从最近的工具调用记录里找反复出现的链，整理成技能 |
+| `space_organize({ force })` | 从最近的工具调用记录里找反复出现的链，整理成技能。只收 danger 全为 safe 的链；必填参数没有默认值的链会跳过并说明原因 |
+| `space_ports({ tool? })` | 读调用记录里存下来的返回值形状，反推每个工具的输出端口路径和类型。纯文本口、空返回、未观测过的各有明确结论 |
+| `space_trim({ skill, apply })` | 跑通后如果判定某步白跑，会在回执里留下建议但不自动改。`apply: true` 才真删，`false` 丢弃建议 |
 
 ## 五、页面
 
@@ -110,6 +112,16 @@ README.md                   本文件
     { "id": "n2", "plugin": "surf", "tool": "surf_read",
       "params": { "url": "${n1.data.results[0].url}" }, "next": null }
   ]
+}
+```
+
+技能还可以带三个可选边界字段，用来让 `space_skills({ query })` 找到它：
+
+```json
+{
+  "useWhen": "要找一篇具体网页并读到正文，或者用户要出处。例：帮我查一下 AstrBot 插件怎么开发，读完告诉我。",
+  "notFor": "只要几个链接、不需要正文时不要用它，直接 surf_search 更快。例：给我几个 AstrBot 的链接。",
+  "outputs": "读到的正文摘录，附带 matched / weak / unrelated 的相关性判定。"
 }
 ```
 
@@ -158,7 +170,17 @@ README.md                   本文件
 
 ---
 
-## 九、和画布（工作台）的关系
+## 九、统计与使用趋势
+
+每次跑完都会追加一条到 `data/runs.json`（保留最近 90 天、最多 2000 条），页面顶部的「使用趋势」按今天 / 近 7 天 / 近 30 天画柱状图：绿是成功、红是失败，下面跟一张按技能分组的表。
+
+`stats.json` 里另有汇总：`runs`、`ok`、`failed`、`lastAt`、`reasons`（按原因分类的失败次数）、`sources`（user / self / page / chat）。
+
+> `sources` 里的 `user` / `self` 是后加的；之前的记录归在 `chat`，标「旧记录（未分类）」，不硬塞进新类别。
+
+---
+
+## 十、和画布（工作台）的关系
 
 插件页有一个「启动画布 / 停止」按钮，能拉起一个**独立的** node 脚本（画布原型，不在本仓库）。
 
@@ -166,7 +188,7 @@ README.md                   本文件
 
 ---
 
-## 十、已知问题
+## 十一、已知问题
 
 | 问题 | 状态 |
 |---|---|
@@ -178,7 +200,7 @@ README.md                   本文件
 
 ---
 
-## 十一、文档
+## 十二、文档
 
 - [`docs/技术说明.md`](docs/技术说明.md) —— 存储结构、执行器、五态、自动整理与精简的实现细节
 - [`docs/实测数据.md`](docs/实测数据.md) —— 原生调用 vs 技能组、自动整理、自动精简、候选砍枝的原始数字
@@ -189,7 +211,7 @@ README.md                   本文件
 
 ---
 
-## 十二、许可
+## 十三、许可
 
 AGPL-3.0-only。第三方声明见 `plugins/thinking-space/THIRD_PARTY_NOTICES.md`。
 
