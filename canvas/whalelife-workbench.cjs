@@ -2,12 +2,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-function argOf(name) {
-  const i = process.argv.indexOf(name);
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;
-}
-const port = Number(argOf('--port') || process.env.WORKBENCH_PORT || 9281);
-const upstream = Number(argOf('--upstream') || process.env.WORKBENCH_WHALE_PORT || 9270);
+const port = Number(process.env.WORKBENCH_PORT || 9281);
+const upstream = Number(process.env.WORKBENCH_WHALE_PORT || 9270);
 if (![port, upstream].every(value => Number.isInteger(value) && value > 0 && value <= 65535) || port === upstream) {
   throw new Error('请选择两个不同的有效端口。');
 }
@@ -15,7 +11,7 @@ const host = '127.0.0.1';
 const origin = `http://${host}:${port}`;
 const targetOrigin = `http://${host}:${upstream}`;
 const identityRoute = 'GET /api/workbench/identity';
-const allowedRoutes = new Set(['POST /api/login', 'GET /api/session/current', 'POST /plugins/workbench-readonly/search-read', identityRoute, 'GET /api/session', 'GET /api/official-plugins', 'GET /plugins/thinking-space/flows', 'POST /plugins/thinking-space/flows', 'GET /plugins/thinking-space/skill', 'GET /plugins/thinking-space/tools']);
+const allowedRoutes = new Set(['POST /api/login', 'GET /api/session/current', 'POST /plugins/workbench-readonly/search-read', identityRoute, 'GET /api/session', 'GET /api/official-plugins', 'POST /api/official-plugins/apply', 'GET /api/community-plugins', 'POST /api/community-plugins/apply', 'GET /plugins/thinking-space/flows', 'POST /plugins/thinking-space/flows', 'GET /plugins/thinking-space/skill', 'GET /plugins/thinking-space/tools']);
 function localHost(req) {
   return req.headers.host === `${host}:${port}`;
 }

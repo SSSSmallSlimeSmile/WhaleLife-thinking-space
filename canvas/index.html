@@ -314,6 +314,9 @@ dialog:has(.flow-form-close) h2{padding-right:34px}
 .store-card-name{font-weight:600;font-size:15px;color:var(--ink)}
 .store-tag{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
 .store-tag.official{color:var(--accent);border-color:var(--accent)}
+.store-install{margin-top:8px;align-self:flex-start;border:1px solid var(--accent);background:rgba(127,127,127,.06);color:var(--accent);border-radius:7px;padding:5px 14px;font:inherit;font-size:13px;cursor:pointer}
+.store-install:hover{background:var(--accent);color:#04140f}
+.store-install[disabled]{opacity:.55;cursor:default}
 .store-card-desc{margin:0;color:var(--muted);font-size:13px;line-height:1.55}
 .store-links{margin-top:auto;display:flex;gap:14px;font-size:13px;padding-top:8px}
 .store-links a{color:var(--accent);text-decoration:none}
@@ -3940,9 +3943,18 @@ render();
       (ver ? '<span class="store-ver">v' + esc(ver) + "</span>" : "") +
       (st ? (isInstalled ? '<span class="store-state installed">\u2713 已安装</span>' : '<span class="store-state">\u53ef\u5b89\u88c5</span>') : "") + "</div>" +
       '<p class="store-card-desc">' + esc(e.description) + "</p>" +
-      '<div class="store-links">' + links + "</div></div></article>";
+      '<div class="store-links">' + links + "</div>" + installBtn(e, st) + "</div></article>";
   }
 
+  // 有安装计划就出一个按钮：官方与社区都走同一个 {id, action, planKey} 协议。
+  function installBtn(e, st) {
+    if (!st || st.installed || !st.action || !st.planKey) return "";
+    const label = st.action === "install" ? "安装" : st.action === "update" ? "更新" : st.action === "repair" ? "修复" : st.action;
+    return '<button type="button" class="store-install" data-store-install="' + esc(e.id) +
+      '" data-store-action="' + esc(String(st.action)) +
+      '" data-store-plan="' + esc(String(st.planKey)) +
+      '" data-store-kind="' + (st.community ? "community" : "official") + '">' + esc(String(label)) + "</button>";
+  }
   function section(title, list, official, status) {
     if (!Array.isArray(list) || !list.length) return "";
     const n = list.filter((e) => status && status[e.id] && status[e.id].installed).length;
@@ -3950,16 +3962,34 @@ render();
       '<div class="store-grid">' + list.map((e, i) => card(e, i, official, status)).join("") + "</div>";
   }
 
-  async function load() {
+  // 插件目录：先拉上游最新（跟随 WhaleLife 仓库），拿不到再用本机快照。
+const REMOTE_CATALOG = "https://raw.githubusercontent.com/iinukami/whalelife/main/market/catalog.json";
+async function fetchCatalog() {
+  try {
+    const r = await fetch(REMOTE_CATALOG, { cache: "no-store" });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && (Array.isArray(j.official) || Array.isArray(j.community))) {
+        catalogSource = "上游";
+        return j;
+      }
+    }
+  } catch (e) { /* 离线或被拦，走本机 */ }
+  const r2 = await fetch("/market/catalog.json", { cache: "no-store" });
+  if (!r2.ok) throw new Error("HTTP " + r2.status);
+  catalogSource = "本机快照";
+  return await r2.json();
+}
+let catalogSource = "";
+
+async function load() {
     if (loaded || loading) return;
     loading = true;
     try {
-      const [catRes, stateRes] = await Promise.all([
-        fetch("/market/catalog.json", { cache: "no-store" }),
-        fetch("/api/official-plugins", { cache: "no-store", credentials: "same-origin" }).catch(() => null),
-      ]);
-      if (!catRes.ok) throw new Error("HTTP " + catRes.status);
-      const cat = await catRes.json();
+      const [cat, stateRes] = await Promise.all([
+  fetchCatalog(),
+  fetch("/api/official-plugins", { cache: "no-store", credentials: "same-origin" }).catch(() => null),
+]);
       let status = null;
       try {
         if (stateRes && stateRes.ok) {
@@ -3968,6 +3998,14 @@ render();
           for (const item of j.plugins || []) status[item.id] = item;
         }
       } catch { status = null; }
+      try {
+        const cRes = await fetch("/api/community-plugins", { cache: "no-store", credentials: "same-origin" });
+        if (cRes.ok) {
+          const cj = await cRes.json();
+          if (!status) status = {};
+          for (const item of cj.plugins || []) { item.community = true; status[item.id] = item; }
+        }
+      } catch (e) { /* 社区目录拿不到就不出安装按钮，不影响看目录 */ }
       const out = section("官方插件", cat.official, true, status) + section("社区插件", cat.community, false, status);
       box.innerHTML = out || '<p class="store-msg">插件目录是空的。</p>';
       loaded = true;
@@ -3991,6 +4029,35 @@ render();
   document.addEventListener("click", (ev) => {
     const opener = ev.target.closest && ev.target.closest("[data-store-open]");
     if (opener) { ev.preventDefault(); open(); return; }
+    const inst = ev.target.closest && ev.target.closest("[data-store-install]");
+    if (inst) {
+      ev.preventDefault();
+      if (inst.disabled) return;
+      const id = inst.getAttribute("data-store-install");
+      const kind = inst.getAttribute("data-store-kind") === "community" ? "community" : "official";
+      const payload = { id: id, action: inst.getAttribute("data-store-action"), planKey: inst.getAttribute("data-store-plan") };
+      inst.disabled = true;
+      inst.textContent = "安装中…";
+      fetch("/api/" + kind + "-plugins/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(payload)
+      }).then(async (r) => {
+        const t = await r.text();
+        if (!r.ok) throw new Error(t || ("HTTP " + r.status));
+        return t;
+      }).then(() => {
+        loaded = false;
+        box.innerHTML = '<p class="store-msg">装好了，正在刷新目录…</p>';
+        return load();
+      }).catch((err) => {
+        inst.disabled = false;
+        inst.textContent = "安装";
+        box.insertAdjacentHTML("afterbegin", '<p class="store-msg">' + esc(err && err.message ? err.message : "安装失败") + "</p>");
+      });
+      return;
+    }
     const submit = ev.target.closest && ev.target.closest("[data-store-submit]");
     if (submit) {
       ev.preventDefault();
