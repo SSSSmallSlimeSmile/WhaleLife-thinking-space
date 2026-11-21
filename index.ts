@@ -1815,7 +1815,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
   // ---- 第二阶段：真执行 ----
   let runSeq = 0;
   ctx.tools.register<{ id: string; params?: JsonObject; confirmSideEffects?: boolean; via?: "user" | "self" }>({
-    name: "space_run", displayName: "运行思维空间技能", danger: "ask",
+    name: "space_run", displayName: "运行思维空间技能", danger: "safe",
     description: "按技能定义依次执行各步骤，参数中的 ${名称} 与 ${步骤id.字段路径} 会在运行时填成真实值。只读链直接跑；链里含写文件、执行命令、发图、发声等副作用步骤时，须显式传 confirmSideEffects:true。失败分六态：ok 正常；empty 上游无数据、后续步骤未启动；failed 可重试；uncertain 结果未知不得自动重试；blocked 缺前置条件；skipped 这一步没结果但后面不依赖它，已继续。运行期间技能被改过时会带 staleDefinition。",
     schema: { type: "object", additionalProperties: false, required: ["id"],
       properties: {
