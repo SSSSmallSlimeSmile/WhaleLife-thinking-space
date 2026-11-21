@@ -747,12 +747,23 @@ function readBody(req: any, limit = 8192): Promise<string> {
   });
 }
 type CanvasState = { pid: number | null; error?: string };
+// 画布纯净版的出处：插件仓库的 canvas/ 目录
+const CANVAS_RAW_BASE = "https://raw.githubusercontent.com/SSSSmallSlimeSmile/WhaleLife-thinking-space/main/canvas/";
+const CANVAS_FILES: Record<string, { file: string; label: string; type: string }> = {
+  "index.html": { file: "index.html", label: "canvas-index.html", type: "text/html; charset=utf-8" },
+  "workbench.cjs": { file: "whalelife-workbench.cjs", label: "whalelife-workbench.cjs", type: "application/javascript; charset=utf-8" },
+};
 function renderSettings(settings: Settings, stats: { total: number; single: number; composite: number }, canvas: CanvasState) {
   return `<section class="space-panel">
   <h2>这是什么</h2>
   <p>思维空间把工具链存成<strong>技能</strong>：单步的进功能库，多步串起来的进复合功能库。技能存在服务端，${PERSONA_SPAN}能直接读写，不用打开这个页面。</p>
   <p>在画布页里画流程、看每个节点的接口和权限，画好回来存成技能，${PERSONA_SPAN}就能一句话调用，不必每次重新串一遍工具。</p>
   <p class="space-muted">技能存下来，${PERSONA_SPAN}在对话里直接就能用；你也能在这页点「跑一次」。每一步的结果、耗时和失败原因都会留在回执里，按 runId 可回查一小时。</p>
+  <p class="space-muted">画布是单独的组件，不随插件自动安装。想要的话，把两个文件下载到同一个目录，运行 <code>node whalelife-workbench.cjs</code>，默认开 9281，再在设置页把「画布脚本路径」指过去。</p>
+  <p class="space-row">
+    <a class="btn space-secondary" href="/plugins/thinking-space/canvas-download?f=index.html" download>下载画布页面</a>
+    <a class="btn space-secondary" href="/plugins/thinking-space/canvas-download?f=workbench.cjs" download>下载画布服务</a>
+  </p>
   <div class="space-rules">
     <h3>技能守则</h3>
     <ol>
@@ -2367,6 +2378,36 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
     res.writeHead(303, { Location: `/plugins/thinking-space/?canvas=${encodeURIComponent(note)}` });
     res.end();
   });
+  ctx.web.page("/plugins/thinking-space/canvas-download", async (req: any, res: any) => {
+    try {
+      const key = String(new URL(req.url || "/", "http://x").searchParams.get("f") || "index.html");
+      const spec = CANVAS_FILES[key];
+      if (!spec) {
+        res.statusCode = 404;
+        res.setHeader("content-type", "text/plain; charset=utf-8");
+        res.end("没有这个画布文件。可选：index.html、workbench.cjs");
+        return;
+      }
+      const upstream = await fetch(CANVAS_RAW_BASE + spec.file, { signal: AbortSignal.timeout(15000) });
+      if (!upstream.ok) {
+        res.statusCode = 502;
+        res.setHeader("content-type", "text/plain; charset=utf-8");
+        res.end("从仓库取画布失败：HTTP " + upstream.status + "。可以直接打开 " + CANVAS_RAW_BASE + spec.file);
+        return;
+      }
+      const body = Buffer.from(await upstream.arrayBuffer());
+      res.statusCode = 200;
+      res.setHeader("content-type", spec.type);
+      res.setHeader("content-length", String(body.length));
+      res.setHeader("content-disposition", 'attachment; filename="' + spec.label + '"');
+      res.setHeader("cache-control", "no-store");
+      res.end(body);
+    } catch (error) {
+      res.statusCode = 500;
+      res.setHeader("content-type", "text/plain; charset=utf-8");
+      res.end("下载画布失败：" + (error instanceof Error ? error.message : String(error)));
+    }
+  }, { title: "画布下载", navigation: false });
   ctx.web.page("/plugins/thinking-space/export", async (_req: any, res: any) => {
     try {
       const store = await readStore();
