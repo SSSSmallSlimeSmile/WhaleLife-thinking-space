@@ -56,6 +56,8 @@ input[type=text],input[type=number]{width:100%;max-width:420px;padding:9px 11px;
 button{padding:9px 18px;border-radius:9px;border:1px solid var(--line);background:transparent;color:inherit;font:inherit;font-weight:600;cursor:pointer}
 button.primary{border-color:#4a8;color:#2a7}
 .notice{padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin:0 0 14px;font-size:14px}
+.open-canvas{display:inline-flex;align-items:center;gap:6px;margin-left:10px;padding:10px 22px;border-radius:10px;background:#6158d9;color:#fff!important;text-decoration:none;font-weight:700;font-size:17px;letter-spacing:.02em;box-shadow:0 4px 14px rgba(97,88,217,.28)}
+.open-canvas:hover{background:#4d45bd}
 a{color:inherit}
 </style></head><body><h1>${escape(title)}</h1>${body}</body></html>`;
 }
@@ -248,7 +250,7 @@ export async function apply(ctx: Context) {
   <p>
     <form method="post" action="${actionPath}" style="display:inline-flex;margin:0"><input type="hidden" name="action" value="start"><button class="primary" type="submit">启动画布</button></form>
     <form method="post" action="${actionPath}" style="display:inline-flex;margin:0 0 0 10px"><input type="hidden" name="action" value="stop"><button type="submit">停止</button></form>
-    ${current.running ? `<a class="badge" style="text-decoration:none;margin-left:10px" href="http://127.0.0.1:${current.port}/" target="_blank" rel="noopener">打开画布 →</a>` : ""}
+    ${current.running ? `<a class="open-canvas" href="http://127.0.0.1:${current.port}/" target="_blank" rel="noopener">前往画布 →</a>` : ""}
   </p>
 </section>
 <section class="panel">

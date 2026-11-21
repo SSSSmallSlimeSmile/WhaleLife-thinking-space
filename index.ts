@@ -408,7 +408,7 @@ function html(title: string, body: string) {
 .space-panel label{display:block;margin:0 0 14px;font-weight:600;font-size:14px}
 .space-panel label textarea{margin-top:6px}
 .space-muted{color:var(--muted);font-size:13px;line-height:1.6}
-.space-open{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border-radius:10px;background:var(--accent);color:#fff!important;text-decoration:none;font-weight:600;font-size:14px}
+.space-open{display:inline-flex;align-items:center;gap:8px;padding:12px 24px;border-radius:10px;background:var(--accent);color:#fff!important;text-decoration:none;font-weight:700;font-size:17px;letter-spacing:.02em;box-shadow:0 4px 14px rgba(97,88,217,.28)}
 .space-open:hover{background:#3d2f9c}
 .space-row{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap}
 .space-check{display:flex;gap:10px;align-items:flex-start;margin:0 0 4px;font-weight:650;font-size:15px;line-height:1.5}
@@ -745,7 +745,8 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
   <p>思维空间把工具链存成<strong>技能</strong>：单步的进功能库，多步串起来的进复合功能库。技能存在服务端，不用打开这个页面，对话里就能直接读写。</p>
   <p>在画布页里画流程、看每个节点的接口和权限，画好回来存成技能，一句话就能调用，不必每次重新串一遍工具。</p>
   <p class="space-muted">技能存下来，对话里直接就能用；你也能在这页点「跑一次」。每一步的结果、耗时和失败原因都会留在回执里，按 runId 可回查一小时。</p>
-  <p class="space-muted">画布拆成了子插件「思维画布」，跟着这个包一起装：启动停止、端口和脚本路径都在 <a href="/plugins/thinking-space/canvas/">思维画布</a> 那页。</p>
+  <p style="margin:14px 0 8px"><a class="space-open" href="/plugins/thinking-space/canvas/">前往画布 →</a></p>
+  <p class="space-muted">画布是子插件「思维画布」，跟着这个包一起装；启动停止、端口和脚本路径都在那一页。</p>
   <div class="space-rules">
     <h3>技能守则</h3>
     <ol>
@@ -765,7 +766,7 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
 </section>
 <section class="space-panel">
   <h2>设置</h2>
-  <form method="post" action="/plugins/thinking-space/settings">
+  <form method="post" action="${pagePath}">
     <label class="space-check"><input type="checkbox" name="allowUse"${settings.allowUse ? " checked" : ""}><span>允许使用整理好的技能</span></label>
     <p class="space-muted">默认开。允许在对话里参考和使用已经保存的技能；关掉后保留技能，但不应使用。此开关会随技能列表返回，供调用方遵守。</p>
     <label class="space-check" style="margin-top:24px"><input type="checkbox" name="autoOrganize"${settings.autoOrganize ? " checked" : ""}><span>自动整理思维</span></label>
@@ -2036,14 +2037,22 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
   };
   ctx.web.page(pagePath, async (req, res) => {
     try {
-      const body = await settingsStats();
+      const query = new URL(req.url ?? "/", "http://localhost").searchParams;
+      const imported = query.get("imported") ?? "";
+      const importErr = query.get("import_err") ?? "";
+      const banner = imported
+        ? `<p class="space-notice ok">${escape(imported)}</p>`
+        : importErr
+          ? `<p class="space-notice err">${escape(importErr)}</p>`
+          : "";
+      const body = banner + await settingsStats();
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html("思维空间", body));
     } catch {
       res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html("思维空间", "<p>暂时读不到技能库，请检查插件数据。</p>"));
     }
-  }, { title: "思维空间", navigation: true });
+  }, { title: "思维空间", navigation: true, settings: true });
   ctx.web.page(pagePath + "space", async (req, res) => {
     try {
       const query = new URL(req.url ?? "/", "http://localhost").searchParams;
@@ -2231,7 +2240,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       res.end();
     }
   });
-  ctx.web.api("/plugins/thinking-space/settings", async (req: any, res: any) => {
+  ctx.web.api(pagePath, async (req: any, res: any) => {
     try {
       const form = await readPayload(req);
       const raw = Math.floor(Number(form.get("maxSteps")));
@@ -2250,11 +2259,11 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         learnOnRequest: form.get("learnOnRequest") === "on",
         triggerPhrase: (() => { const v = String(form.get("triggerPhrase") ?? "").trim(); return v ? v.slice(0, 80) : defaultTriggerPhrase; })(),
       });
-      res.writeHead(303, { Location: "/plugins/thinking-space/settings" });
+      res.writeHead(303, { Location: pagePath });
       res.end();
     } catch (error) {
       res.writeHead(400, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(html("思维空间设置", `<p>没有保存：${escape(error instanceof Error ? error.message : "")}</p><p><a href="/plugins/thinking-space/settings">返回</a></p>`));
+      res.end(html("思维空间设置", `<p>没有保存：${escape(error instanceof Error ? error.message : "")}</p><p><a href="${pagePath}">返回</a></p>`));
     }
   });
   ctx.web.page("/plugins/thinking-space/export", async (_req: any, res: any) => {
@@ -2297,11 +2306,11 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       }
       const note = "导入完成：新增 " + created + " 条，覆盖 " + overwritten + " 条" +
         (failed.length ? "，" + failed.length + " 条没成（" + failed.slice(0, 3).join("；") + "）" : "") + "。";
-      res.writeHead(303, { Location: "/plugins/thinking-space/settings?imported=" + encodeURIComponent(note) });
+      res.writeHead(303, { Location: pagePath + "?imported=" + encodeURIComponent(note) });
       res.end();
     } catch (error) {
       const message = error instanceof Error ? error.message : "导入失败。";
-      res.writeHead(303, { Location: "/plugins/thinking-space/settings?import_err=" + encodeURIComponent(message) });
+      res.writeHead(303, { Location: pagePath + "?import_err=" + encodeURIComponent(message) });
       res.end();
     }
   });
@@ -2519,26 +2528,4 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       res.end();
     }
   });
-  ctx.web.page("/plugins/thinking-space/settings", async (req: any, res: any) => {
-    try {
-      const query = new URL(req.url ?? "/", "http://localhost").searchParams;
-      const imported = query.get("imported") ?? "";
-      const importErr = query.get("import_err") ?? "";
-      const banner = imported
-        ? "<p class=\"space-notice ok\">" + escape(imported) + "</p>"
-        : importErr
-          ? "<p class=\"space-notice err\">没有导入：" + escape(importErr) + "</p>"
-          : "";
-      const [settings, skills] = await Promise.all([readSettings(), list()]);
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(html("思维空间设置", banner + renderSettings(settings, {
-        total: skills.length,
-        single: skills.filter(skill => skill.kind === "single").length,
-        composite: skills.filter(skill => skill.kind === "composite").length,
-      })));
-    } catch {
-      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(html("思维空间设置", "<p>暂时读不到技能库，请检查插件数据。</p>"));
-    }
-  }, { title: "思维空间", settings: true });
 }

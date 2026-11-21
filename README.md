@@ -22,10 +22,9 @@ WhaleLife 插件。把「一串工具调用」存成一条可复用的技能，�
 
 | 路由 | 内容 |
 |---|---|
-| `/plugins/thinking-space/` | 介绍、当前状态、设置、打开画布 |
+| `/plugins/thinking-space/` | 介绍、当前状态、设置（唯一入口，也接管导入回执） |
 | `/plugins/thinking-space/space` | 功能库 / 复合功能库列表，每条可「跑一次」「编辑步骤」 |
 | `/plugins/thinking-space/edit?id=` | 改步骤：参数 JSON、上移 / 下移 / 删除、新增一步 |
-| `/plugins/thinking-space/settings` | 同一个设置页（插件管理里点「设置」走这条） |
 | `/plugins/thinking-space/export` | 导出全部技能为 JSON |
 
 ---

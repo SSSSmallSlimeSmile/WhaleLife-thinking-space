@@ -339,7 +339,7 @@ button.market-entry{background:transparent}
 .node-delta-row span{color:#5c6b62;margin-right:4px}
 .node-action-tag{margin-left:6px;font-size:10px;padding:1px 5px;border-radius:999px;background:rgba(31,157,85,.14);color:#1f9d55}
 </style>
-<header><b id="robot-initial" aria-hidden="true">__PERSONA__</b><strong id="robot-title">__PERSONA__的思维空间</strong><form id="wish-launch" class="wish-launch"><input aria-label="许愿一个功能" placeholder="许愿一个功能，或聊聊"><button type="submit">许愿一个功能</button></form><label class="theme-control"><span>界面风格</span><select id="theme" aria-label="界面风格"><option value="light">浅色工作台</option><option value="dark">深色画布</option></select></label><button type="button" id="save-project">思维保存</button><button type="button" id="prune-orphans">清理空节点</button><button type="button" data-action="project-options">工程管理</button><button type="button" id="reload-canvas" title="重新加载画布（聊天记录保留）">重载画布</button><span id="project-save-feedback" class="sr-only" role="status"></span></header>
+<header><b id="robot-initial" aria-hidden="true">__PERSONA__</b><strong id="robot-title">__PERSONA__的思维空间</strong><form id="wish-launch" class="wish-launch"><input aria-label="许愿一个功能" placeholder="许愿一个功能，或聊聊"><button type="submit">许愿一个功能</button></form><label class="theme-control"><span>界面风格</span><select id="theme" aria-label="界面风格"><option value="light">浅色工作台</option><option value="dark">深色画布</option></select></label><button type="button" id="save-project">思维保存</button><button type="button" data-action="project-options">工程管理</button><button type="button" id="reload-canvas" title="重新加载画布（聊天记录保留）">重载画布</button><span id="project-save-feedback" class="sr-only" role="status"></span></header>
 <nav id="tabs" aria-label="工作台标签页"></nav>
 <main id="main"></main>
 <section id="wish-panel" class="wish-panel" aria-label="许愿一个功能" hidden>
@@ -938,6 +938,7 @@ function cleanIdleNodes(flow,view){
   const connected=new Set(flow.edges.flatMap(([from,to])=>[from,to]));
   const idle=new Set(flow.nodes.filter(node=>!connected.has(node.id)).map(node=>node.id));
   if(idle.size){
+    try{localStorage.setItem('robot-workbench-prune-backup',JSON.stringify({savedAt:new Date().toISOString(),project:JSON.stringify(projectState())}));}catch{}
     removeCanvasNodes(flow,idle);
     persist();
   }
@@ -2181,15 +2182,16 @@ function showRemoteBanner(snapshot,at){
   const bar=document.createElement('div');
   bar.id='remote-update-banner';
   bar.setAttribute('role','status');
-  bar.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:99;display:flex;gap:10px;align-items:center;flex-wrap:wrap;max-width:min(760px,92vw);padding:10px 14px;border-radius:10px;background:#1f2430;color:#f3f4f6;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.28)';
+  bar.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:99;display:flex;gap:10px;align-items:center;flex-wrap:wrap;max-width:min(760px,92vw);padding:12px 16px;border-radius:10px;background:#1f2430;color:#f3f4f6;font-size:13.5px;box-shadow:0 8px 24px rgba(0,0,0,.38);border:1px solid #3a4256';
   const text=document.createElement('span');
   text.textContent='思维空间那边更新了画布快照（'+new Date(at).toLocaleTimeString('zh-CN')+'），这边还有没保存的改动。';
   const load=document.createElement('button');
   load.type='button';load.textContent='载入服务端版本';
+  load.style.cssText='background:#fff;color:#1f2430;border:0;padding:6px 12px;border-radius:6px;cursor:pointer;font-weight:700';
   load.onclick=()=>{clearRemoteBanner();remoteConflict=null;adoptServerSnapshot(snapshot);};
   const keep=document.createElement('button');
   keep.type='button';keep.textContent='保留本地，下次保存覆盖';
-  keep.style.cssText='background:#3b4252;color:#fff;border:0;padding:6px 10px;border-radius:6px;cursor:pointer';
+  keep.style.cssText='background:#3b4252;color:#fff;border:1px solid #596273;padding:6px 12px;border-radius:6px;cursor:pointer;font-weight:600';
   keep.onclick=()=>{clearRemoteBanner();remoteConflict=null;};
   bar.appendChild(text);bar.appendChild(load);bar.appendChild(keep);
   document.body.appendChild(bar);
@@ -3974,28 +3976,6 @@ registerContractEntries();
 initWish();
 void refreshRobotIdentity();
 document.querySelector('#save-project')?.addEventListener('click',saveProject);
-function pruneOrphanNodes(){
-  const snapshot=JSON.stringify(projectState());
-  try{localStorage.setItem('robot-workbench-prune-backup',JSON.stringify({savedAt:new Date().toISOString(),project:snapshot}));}catch{}
-  let total=0;
-  const report=[];
-  for(const flow of flows){
-    const used=new Set();
-    for(const [from,to] of flow.edges){used.add(from);used.add(to);}
-    const orphans=flow.nodes.filter(n=>!used.has(n.id));
-    if(!orphans.length)continue;
-    removeCanvasNodes(flow,new Set(orphans.map(n=>n.id)));
-    total+=orphans.length;
-    report.push((flow.name||flow.id)+'：'+orphans.length+' 个');
-  }
-  render();
-  if(total>0)saveProject();
-  const list=report.map(x=>'<li>'+safe(x)+'</li>').join('');
-  showDialog('清理未连线节点',total
-    ?'<p>共移除 '+total+' 个没有连线的方块。</p><ul>'+list+'</ul><p>清理前的完整工程已备份到当前浏览器（键 <code>robot-workbench-prune-backup</code>）。</p>'+closeButton
-    :'<p>没有找到未连线的方块，什么都没动。</p>'+closeButton);
-}
-document.querySelector('#prune-orphans')?.addEventListener('click',pruneOrphanNodes);
 async function softReloadCanvas(){
   const note=document.getElementById('project-save-feedback');
   let msg='';

@@ -44,7 +44,7 @@ id=技能id&p:参数名=参数值&confirmSideEffects=on
 ## 改设置
 
 ```
-POST /plugins/thinking-space/settings
+POST /plugins/thinking-space/
 Content-Type: application/x-www-form-urlencoded
 
 allowUse=on&allowSave=on&maxSteps=20&...
