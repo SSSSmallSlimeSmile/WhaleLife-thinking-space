@@ -290,8 +290,7 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 - [`docs/插件接入规范.md`](docs/插件接入规范.md) —— 建议上游加一个可选的输出端口声明，让插件市场的插件能无缝转进来
 - [`docs/待问清单.md`](docs/待问清单.md) —— 需要上游拍板的问题
 - [`docs/给上游的插件说明.md`](docs/给上游的插件说明.md) —— 十二节完整说明，含设计取舍
-
----
+- [`docs/HTTP接口.md`](docs/HTTP接口.md) —— 导入/运行接口的调用格式，`payload` 字段、`schemaVersion`、步数约束这些坑
 
 ---
 
