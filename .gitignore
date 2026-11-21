@@ -1,21 +1,17 @@
 node_modules/
+
+# 本机数据文件，不进仓库；只保留 settings.example.json
 data/config.json
 data/skills.json
 data/calls.json
 data/stats.json
 data/settings.json
+data/failures.json
+data/runs.json
+data/param-defaults.json
+data/local-report.json
 data/backup/
-
-# 插件自己的数据目录：只保留 settings.example.json，其余不入库
-plugins/thinking-space/data/config.json
-plugins/thinking-space/data/skills.json
-plugins/thinking-space/data/calls.json
-plugins/thinking-space/data/stats.json
-plugins/thinking-space/data/settings.json
-plugins/thinking-space/data/failures.json
-plugins/thinking-space/data/param-defaults.json
-plugins/thinking-space/data/backup/
-plugins/thinking-space/data/media/
+data/media/
 
 *.bak-*
 *.bak
