@@ -3,9 +3,7 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import type { Context, ToolContract } from "whalelife";
-import { execFile, spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 const storeFile = "skills.json";
 const settingsFile = "settings.json";
@@ -14,10 +12,6 @@ const localReportFile = "local-report.json";
 const paramDefaultsFile = "param-defaults.json";
 const pagePath = "/plugins/thinking-space/";
 const defaultSpaceUrl = "http://127.0.0.1:9281/";
-const defaultCanvasScript = "";  // 不写死任何本机路径；留空时由设置页填。
-const canvasPort = 9281;
-/** 本插件亲手启出来的画布进程。宿主退出时按这个收，别人的不动。 */
-let canvasHostPid: number | null = null;
 const defaultTriggerPhrase = "XXX，你学会了吗？";
 const idPattern = /^[a-zA-Z0-9_-]{1,64}$/;
 const parameterPattern = /^[\p{L}_][\p{L}\p{N}_-]{0,63}$/u;
@@ -30,7 +24,7 @@ type Parameter = { name: string; type: typeof types[number]; required: boolean; 
 type Step = { id: string; tool: string; plugin: string; params: JsonObject; next: string | null };
 type Skill = { schemaVersion: 1; id: string; name: string; description: string; kind: "single" | "composite"; params: Parameter[]; steps: Step[]; danger: Danger; revision?: number; useWhen?: string; notFor?: string; outputs?: string };
 type Store = { schemaVersion: 1; skills: Skill[] };
-type Settings = { observeHands: boolean; allowRiskyChains: boolean; allowSave: boolean; allowUse: boolean; maxSteps: number; autoOrganize: boolean; spaceUrl: string; stepTimeoutSeconds: number; organizeThreshold: number; organizeWindowMinutes: number; autoSaveOrganized: boolean; learnOnRequest: boolean; triggerPhrase: string; canvasScript: string };
+type Settings = { observeHands: boolean; allowRiskyChains: boolean; allowSave: boolean; allowUse: boolean; maxSteps: number; autoOrganize: boolean; spaceUrl: string; stepTimeoutSeconds: number; organizeThreshold: number; organizeWindowMinutes: number; autoSaveOrganized: boolean; learnOnRequest: boolean; triggerPhrase: string };
 
 function withTimeout<T>(work: Promise<T>, seconds: number, tool: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -745,26 +739,13 @@ function readBody(req: any, limit = 8192): Promise<string> {
     req.on("error", reject);
   });
 }
-type CanvasState = { pid: number | null; error?: string };
-// 画布纯净版的出处：插件仓库的 canvas/ 目录
-const CANVAS_RAW_BASE = "https://raw.githubusercontent.com/SSSSmallSlimeSmile/WhaleLife-thinking-space/main/canvas/";
-// 内容接口不吃 CDN 缓存，刚发布的版本也能立刻取到
-const CANVAS_API_BASE = "https://api.github.com/repos/SSSSmallSlimeSmile/WhaleLife-thinking-space/contents/canvas/";
-const CANVAS_FILES: Record<string, { file: string; label: string; type: string }> = {
-  "index.html": { file: "index.html", label: "index.html", type: "text/html; charset=utf-8" },
-  "workbench.cjs": { file: "whalelife-workbench.cjs", label: "whalelife-workbench.cjs", type: "application/javascript; charset=utf-8" },
-};
-function renderSettings(settings: Settings, stats: { total: number; single: number; composite: number }, canvas: CanvasState) {
+function renderSettings(settings: Settings, stats: { total: number; single: number; composite: number }) {
   return `<section class="space-panel">
   <h2>这是什么</h2>
   <p>思维空间把工具链存成<strong>技能</strong>：单步的进功能库，多步串起来的进复合功能库。技能存在服务端，不用打开这个页面，对话里就能直接读写。</p>
   <p>在画布页里画流程、看每个节点的接口和权限，画好回来存成技能，一句话就能调用，不必每次重新串一遍工具。</p>
   <p class="space-muted">技能存下来，对话里直接就能用；你也能在这页点「跑一次」。每一步的结果、耗时和失败原因都会留在回执里，按 runId 可回查一小时。</p>
-  <p class="space-muted">画布是单独的组件，不随插件自动安装。想要的话，把两个文件下载到同一个目录，运行 <code>node whalelife-workbench.cjs</code>，默认开 9281，再在设置页把「画布脚本路径」指过去。</p>
-  <p class="space-row">
-    <a class="btn space-secondary" href="/plugins/thinking-space/canvas-download?f=index.html" download>下载画布页面</a>
-    <a class="btn space-secondary" href="/plugins/thinking-space/canvas-download?f=workbench.cjs" download>下载画布服务</a>
-  </p>
+  <p class="space-muted">画布拆成了子插件「思维画布」，跟着这个包一起装：启动停止、端口和脚本路径都在 <a href="/plugins/thinking-space/canvas/">思维画布</a> 那页。</p>
   <div class="space-rules">
     <h3>技能守则</h3>
     <ol>
@@ -777,14 +758,6 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
   </div>
   <p class="space-row" style="margin-top:16px"><a class="space-open" href="${escape(settings.spaceUrl)}" target="_blank" rel="noopener">打开思维空间 →</a></p>
   <p class="space-muted" style="margin-top:8px">当前地址 ${escape(settings.spaceUrl)}</p>
-  <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">
-    <p><span class="space-badge${canvas.pid ? "" : " warn"}">${canvas.pid ? `运行中 · PID ${canvas.pid}` : "没在跑"}</span><span class="space-badge">端口 ${canvasPort}</span></p>
-    <p class="space-muted">画布是独立的 node 脚本，开机不会自己起来。要用的时候点启动，不用了点停止。${canvas.error ? `上次出错：${escape(canvas.error)}` : ""}</p>
-    <p class="space-row" style="margin:0">
-      <form method="post" action="/plugins/thinking-space/canvas" style="display:inline-flex;margin:0"><input type="hidden" name="action" value="start"><button class="btn primary space-save" type="submit">启动画布</button></form>
-      <form method="post" action="/plugins/thinking-space/canvas" style="display:inline-flex;margin:0 0 0 10px"><input type="hidden" name="action" value="stop"><button class="btn space-secondary" type="submit">停止</button></form>
-    </p>
-  </div>
 </section>
 <section class="space-panel">
   <h2>当前状态</h2>
@@ -834,10 +807,6 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
     <div class="space-field">画布页面地址</div>
     <input type="text" name="spaceUrl" value="${escape(settings.spaceUrl)}">
     <p class="space-muted" style="margin-top:6px">只认 http 或 https 开头，最多 300 字。改完保存，再点上面的按钮就会去新地址。</p>
-
-    <div class="space-field">画布脚本路径</div>
-    <input type="text" name="canvasScript" value="${escape(settings.canvasScript)}">
-    <p class="space-muted" style="margin-top:6px">点「启动画布」时运行这个脚本，用的是 WhaleLife 自己的 node。默认填的是这台机器上那份 whalelife-workbench.cjs；换机器要么改这里，要么把文件放到同样的位置。</p>
 
     <button class="btn primary space-save" type="submit">保存设置</button>
   </form>
@@ -997,8 +966,7 @@ const catalogByName = async () => new Map([
       learnOnRequest: data?.learnOnRequest !== false,
       triggerPhrase: typeof data?.triggerPhrase === "string" && data.triggerPhrase.trim().length
         ? data.triggerPhrase.trim().slice(0, 80) : defaultTriggerPhrase,
-      canvasScript: typeof data?.canvasScript === "string" && data.canvasScript.trim().length
-        ? data.canvasScript.trim().slice(0, 500) : defaultCanvasScript };
+};
   }
   const callsFile = "calls.json";
   type CallRecord = { ts: string; name: string; ok: boolean; session?: string; source?: string; transient?: true; shape?: string };
@@ -2060,138 +2028,17 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         ({ runId: id, skill: item.skill, status: item.status, steps: item.steps.length })) };
     },
   });
-
-  let canvasError: string | undefined;
-  function ps(command: string): Promise<{ code: number; out: string; err: string }> {
-    return new Promise((resolve) => {
-      execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command],
-        { windowsHide: true, timeout: 20000 },
-        (error, stdout, stderr) => {
-          const raw = (error as { code?: unknown } | null)?.code;
-          const code = error ? (typeof raw === "number" ? raw : 1) : 0;
-          resolve({ code, out: String(stdout ?? ""), err: String(stderr ?? "") });
-        });
-    });
-  }
-  async function canvasPid(): Promise<number | null> {
-    const result = await ps(`(Get-NetTCPConnection -LocalPort ${canvasPort} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess`);
-    const pid = Number(result.out.trim());
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  }
-  async function canvasCmdline(pid: number): Promise<string> {
-    const result = await ps(`(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue).CommandLine`);
-    return result.out.trim();
-  }
-  // 画布要连的是"我这个宿主"的端口，不是脚本里写死的默认值。
-  // 宿主根目录下 config/config.json 的 web.port 才是准的；读不到就退回脚本自己的默认。
-  function locateUpstream(): { root: string; port: number } | null {
-    // process.cwd() 不一定是宿主根；宿主进程的启动参数里通常带着根目录，一并试。
-    const argRoots = process.argv
-      .filter((item) => /^[A-Za-z]:[\\/]/.test(item) && !/\.[A-Za-z0-9]{1,6}$/.test(item))
-      .map((item) => resolve(item));
-    const bases = [
-      ...argRoots,
-      process.cwd(),
-      resolve(process.cwd(), ".."),
-      resolve(process.cwd(), "..", ".."),
-    ];
-    for (const base of bases) {
-      const configFile = join(base, "config", "config.json");
-      if (!existsSync(configFile)) continue;
-      try {
-        const raw = JSON.parse(readFileSync(configFile, "utf8"));
-        const port = Math.floor(Number(raw?.web?.port));
-        if (Number.isInteger(port) && port > 0 && port <= 65535 && port !== canvasPort) return { root: base, port };
-      } catch { /* 读不动就换下一个候选 */ }
-    }
-    return null;
-  }
-  function locateCanvasScript(located: { root: string } | null): string {
-    const bases = located ? [located.root, process.cwd()] : [process.cwd(), resolve(process.cwd(), "..")];
-    for (const base of bases) {
-      const scriptFile = join(base, "plugins", "thinking-space", "canvas", "whalelife-workbench.cjs");
-      if (existsSync(scriptFile)) return scriptFile;
-    }
-    return "";
-  }
-  async function canvasState(): Promise<CanvasState> {
-    const pid = await canvasPid();
-    return pid ? { pid } : { pid: null, ...(canvasError ? { error: canvasError } : {}) };
-  }
-  async function startCanvas(): Promise<string> {
-    const running = await canvasPid();
-    if (running) { canvasHostPid = running; canvasError = undefined; return `画布已经在跑了（PID ${running}）。`; }
-    const located = locateUpstream();
-    const configured = (await readSettings()).canvasScript;
-    const script = configured || locateCanvasScript(located);
-    if (!script) { canvasError = "还没配置画布脚本路径：设置页 → 画布服务 → 画布脚本路径，填完整路径。"; return canvasError; }
-    if (!existsSync(script)) { canvasError = `找不到脚本：${script}`; return canvasError; }
-    try {
-      const args = located ? [script, "--upstream", String(located.port)] : [script];
-      const child = spawn(process.execPath, args, { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
-      child.unref();
-      canvasHostPid = child.pid ?? null;
-      const ownerPid = canvasHostPid;
-      // 它自己退了就清记录，避免 PID 被系统复用后，宿主退出时误杀别的进程。
-      child.once("exit", () => { if (canvasHostPid === ownerPid) canvasHostPid = null; });
-    } catch (error) {
-      canvasError = `拉不起来：${error instanceof Error ? error.message : ""}`;
-      return canvasError;
-    }
-    for (let i = 0; i < 24; i += 1) {
-      await new Promise(resolve => setTimeout(resolve, 250));
-      const pid = await canvasPid();
-      if (pid) { canvasError = undefined; return `画布起来了（PID ${pid}，端口 ${canvasPort}）。`; }
-    }
-    canvasError = "脚本已经拉起，但 6 秒内没等到端口，去看一下脚本自己有没有报错。";
-    return canvasError;
-  }
-  async function stopCanvas(): Promise<string> {
-    const pid = await canvasPid();
-    if (!pid) { canvasError = undefined; return "本来就没在跑。"; }
-    // 只停画布本身：端口上跑的可能是不相干的本地服务，不动它。
-    // 不能只认"这个实例拉起的"——宿主重启过、或画布是手动起的，那边的记录就没了。
-    // 所以再看命令行：能认出是画布脚本就停，认不出才拒绝。
-    if (canvasHostPid !== pid) {
-      const cmd = await canvasCmdline(pid);
-      const script = (await readSettings()).canvasScript;
-      const expected = script ? basename(script) : "";
-      const looksCanvas =
-        !!cmd &&
-        (/whalelife-workbench/i.test(cmd) || (!!expected && cmd.includes(expected)));
-      if (!looksCanvas) {
-        canvasError = `端口 ${canvasPort} 上的进程（PID ${pid}）看起来不是画布脚本，没有动它。命令行：${cmd || "（读不到）"}`;
-        return canvasError;
-      }
-    }
-    await ps(`taskkill /PID ${pid} /F`);
-    if (await canvasPid()) { canvasError = `停不下来（PID ${pid}）。`; return canvasError; }
-    canvasHostPid = null;
-    canvasError = undefined;
-    return `画布已停（PID ${pid}）。`;
-  }
-  // 宿主关闭时把画布一起收掉。画布是 detached 起的，不主动收会一直挂着占显存。
-  // 这里用同步 taskkill：宿主 close() 只有超时兜底，等异步 PowerShell 轮询来不及。
-  ctx.on("whalelife/shutdown", () => {
-    const pid = canvasHostPid;
-    if (!pid) return;
-    try { spawnSync("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true, stdio: "ignore" }); }
-    catch { /* 已经退了就算了 */ }
-    canvasHostPid = null;
-  });
   const settingsStats = async () => {
     const [settings, skills] = await Promise.all([readSettings(), list()]);
     return renderSettings(settings, {
       total: skills.length,
       single: skills.filter(skill => skill.kind === "single").length,
       composite: skills.filter(skill => skill.kind === "composite").length,
-    }, await canvasState());
+    });
   };
   ctx.web.page(pagePath, async (req, res) => {
     try {
-      const query = new URL(req.url ?? "/", "http://localhost").searchParams;
-      const note = query.get("canvas") ?? "";
-      const body = (note ? `<section class="space-panel"><h2>画布</h2><p>${escape(note)}</p></section>` : "") + await settingsStats();
+      const body = await settingsStats();
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html("思维空间", body));
     } catch {
@@ -2404,7 +2251,6 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         allowRiskyChains: form.get("allowRiskyChains") === "on",
         learnOnRequest: form.get("learnOnRequest") === "on",
         triggerPhrase: (() => { const v = String(form.get("triggerPhrase") ?? "").trim(); return v ? v.slice(0, 80) : defaultTriggerPhrase; })(),
-        canvasScript: (() => { const v = String(form.get("canvasScript") ?? "").trim(); return v ? v.slice(0, 500) : defaultCanvasScript; })(),
       });
       res.writeHead(303, { Location: "/plugins/thinking-space/settings" });
       res.end();
@@ -2413,62 +2259,6 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       res.end(html("思维空间设置", `<p>没有保存：${escape(error instanceof Error ? error.message : "")}</p><p><a href="/plugins/thinking-space/settings">返回</a></p>`));
     }
   });
-  ctx.web.api("/plugins/thinking-space/canvas", async (req: any, res: any) => {
-    let note = "";
-    try {
-      const raw = await readBody(req);
-      const isJson = /^application\/json/i.test(String(req.headers?.["content-type"] ?? ""));
-      const action = isJson
-        ? String((JSON.parse(raw || "{}") as { action?: unknown }).action ?? "")
-        : String(new URLSearchParams(raw).get("action") ?? "");
-      note = action === "stop" ? await stopCanvas() : await startCanvas();
-    } catch (error) {
-      note = `没做成：${error instanceof Error ? error.message : ""}`;
-    }
-    res.writeHead(303, { Location: `/plugins/thinking-space/?canvas=${encodeURIComponent(note)}` });
-    res.end();
-  });
-  ctx.web.page("/plugins/thinking-space/canvas-download", async (req: any, res: any) => {
-    try {
-      const key = String(new URL(req.url || "/", "http://x").searchParams.get("f") || "index.html");
-      const spec = CANVAS_FILES[key];
-      if (!spec) {
-        res.statusCode = 404;
-        res.setHeader("content-type", "text/plain; charset=utf-8");
-        res.end("没有这个画布文件。可选：index.html、workbench.cjs");
-        return;
-      }
-      // 先走 GitHub 内容接口：raw 有 CDN 缓存，刚发布的版本可能还是旧的。
-      let body: Buffer | null = null;
-      try {
-        const api = await fetch(CANVAS_API_BASE + spec.file + "?ref=main", {
-          headers: { accept: "application/vnd.github.raw", "user-agent": "whalelife-thinking-space" },
-          signal: AbortSignal.timeout(15000),
-        });
-        if (api.ok) body = Buffer.from(await api.arrayBuffer());
-      } catch { /* 接口不通就走 raw */ }
-      if (!body) {
-        const upstream = await fetch(CANVAS_RAW_BASE + spec.file, { signal: AbortSignal.timeout(15000) });
-        if (!upstream.ok) {
-          res.statusCode = 502;
-          res.setHeader("content-type", "text/plain; charset=utf-8");
-          res.end("从仓库取画布失败：HTTP " + upstream.status + "。可以直接打开 " + CANVAS_RAW_BASE + spec.file);
-          return;
-        }
-        body = Buffer.from(await upstream.arrayBuffer());
-      }
-      res.statusCode = 200;
-      res.setHeader("content-type", spec.type);
-      res.setHeader("content-length", String(body.length));
-      res.setHeader("content-disposition", 'attachment; filename="' + spec.label + '"');
-      res.setHeader("cache-control", "no-store");
-      res.end(body);
-    } catch (error) {
-      res.statusCode = 500;
-      res.setHeader("content-type", "text/plain; charset=utf-8");
-      res.end("下载画布失败：" + (error instanceof Error ? error.message : String(error)));
-    }
-  }, { title: "画布下载", navigation: false });
   ctx.web.page("/plugins/thinking-space/export", async (_req: any, res: any) => {
     try {
       const store = await readStore();
@@ -2728,7 +2518,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         total: skills.length,
         single: skills.filter(skill => skill.kind === "single").length,
         composite: skills.filter(skill => skill.kind === "composite").length,
-      }, await canvasState())));
+      })));
     } catch {
       res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html("思维空间设置", "<p>暂时读不到技能库，请检查插件数据。</p>"));

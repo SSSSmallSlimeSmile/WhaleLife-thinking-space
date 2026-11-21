@@ -17,3 +17,5 @@ data/media/
 *.bak
 *.log
 tmp/
+.tmp/
+sub/*/data/

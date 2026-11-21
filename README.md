@@ -74,7 +74,7 @@ plugins/thinking-space/
   index.ts
   install.mjs          一键安装脚本
   data/settings.example.json
-  canvas/              画布组件（可选）
+  sub/canvas/          思维画布（子插件，独立的 node 进程）
   docs/                技术说明与实测数据
 ```
 
@@ -212,7 +212,6 @@ plugins/thinking-space/
 | `learnOnRequest` | 开 | 让助手知道「用户说一句话时就该去整理」 |
 | `triggerPhrase` | `XXX，你学会这个技能了吗？` | 那句话本身，`XXX` 换成人格名 |
 | `stepTimeoutSeconds` | 60 | 单步超时，1–600 |
-| `canvasScript` | 空 | 画布脚本的完整路径。**出厂为空**，不写死任何人的路径；留空时点「启动画布」会提示去设置页填 |
 | `observeHands` | 关 | 是否记录 `hands_*` 类工具的返回值形状。开着也只记键名和类型（如 `{ok:b,result:s}`），不记路径、不记正文 |
 
 **`learnOnRequest` 和 `triggerPhrase` 只是把状态带给模型，插件本身不监听对话。** 听不听那句话，是模型负责的事。
@@ -262,40 +261,27 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 **七、`comfy_generate` 这类常驻 GPU 的工具，第二次出图可能因为显存没释放被自己的阈值拦住**，跟技能库无关。
 
-**八、画布的启停只在 Windows 验证过。** 查端口、结束进程走的是 `taskkill` 和 PowerShell，Linux / macOS 上「启动画布 / 停止」会失败；技能库、执行器、页面、自动整理不依赖平台。
+**八、画布的启停只在 Windows 验证过。** 画布是子插件，查端口、结束进程走的是 `taskkill` 和 PowerShell，Linux / macOS 上「启动画布 / 停止」会失败；技能库、执行器、页面、自动整理不依赖平台。
 
-**九、宿主关闭时只收自己启起来的那一个。** 插件会记住亲手 spawn 出来的画布 PID，在 `whalelife/shutdown` 里同步 kill 掉，避免 detached 进程一直挂着占显存。你在外面手动起的画布不归它管，得自己停。
+**九、画布进程跟着子插件收。** 画布是 detached 起的，子插件 stop 时用同步 `taskkill` 收掉（父插件停 → 子插件停 → 画布收）；设置页那个开关可以关掉这个行为。在外面手动起的画布不归它管，得自己停——不过画布自己有看门狗，宿主端口连不上两次就会退出。
 
 ---
 
-## 十、画布（可选组件）
+## 十、画布（子插件）
 
-插件页有一个「启动画布 / 停止」按钮，拉起的是 `canvas/whalelife-workbench.cjs` —— 一个**独立的** node 小服务，默认监听 9281，把画布页面和宿主（9270）连起来。
+画布是包里的子插件 `thinking-space/canvas`：目录在 `plugins/thinking-space/sub/canvas/`，
+运行时 id 是 `thinking-space/canvas`，随父插件一起装、一起启用。
 
-画布本身是单文件网页 `canvas/index.html`，不是插件，不注册任何工具。**它和技能库目前没有双向同步**：技能能注入成节点看，画布上的改动不回写技能定义。
+它自己管一个 node 小服务（`sub/canvas/whalelife-workbench.cjs`，默认监听 9281），把画布页面和宿主连起来。
+启停、端口、脚本路径都在「思维画布」那一页（父插件卡片下面的子插件），不再塞在思维空间的设置页里。
 
-### 装法
+**端口和上游**：画布端口在子插件设置页里改，默认 9281；要连哪个宿主不用填——它自己读宿主
+`config/config.json` 里的 `web.port`，读不到就不启动，免得连到别的实例上。
 
-**甲、从插件页下载（两个按钮，零配置）**
+**跟着思维空间走**：默认勾着「思维空间停掉时，画布一起收掉」。停用父插件时宿主先停子插件，
+子插件再把画布进程收掉。不勾就各停各的，画布会挂到宿主退出或你手动停。
 
-插件页「这是什么」下面有两个下载按钮，**用浏览器默认文件名存进同一个空目录**即可：
-
-```
-1. 点「下载画布页面」→ 存为 index.html
-2. 点「下载画布服务」→ 存为 whalelife-workbench.cjs
-3. 设置页 → 画布服务 → 画布脚本路径 → 填那个 whalelife-workbench.cjs 的完整路径
-4. 设置页 → 画布服务 → 启动画布
-5. 浏览器打开 http://127.0.0.1:9281/
-```
-
-两个文件必须在同一目录。服务优先找同目录的 `index.html`；找不到会认 `canvas-index.html`（早期版本下载得到的默认名），再找不到就用目录里唯一的那份 `.html`。
-
-**乙、从仓库取**
-
-```
-1. 把 canvas 目录整个放到任意位置（不要放进 plugins）
-2. 剩下同上第 3、4 步
-```
+**三个工具**：`canvas_status`（只读）、`canvas_start`、`canvas_stop`（后两个要确认）。
 
 ### 依赖
 
