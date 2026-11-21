@@ -163,9 +163,11 @@ function validateSkill(id: unknown, spec: unknown, catalog: Map<string, ToolCont
     const next = index === chain.length - 1 ? null : chain[index + 1]?.id;
     if (item.next !== next) throw new Error(item.id + " 的 next 须指向列表中的下一步，末步须为 null。");
     const tool = typeof item.tool === "string" ? catalog.get(item.tool) : undefined;
-    if (!tool || (item.plugin !== undefined && item.plugin !== tool.plugin)) throw new Error(item.id + " 的工具在运行目录中不可用或来源不匹配。");
+    const pluginKnown = typeof tool?.plugin === "string" && tool.plugin !== "";
+    if (!tool || (pluginKnown && item.plugin !== undefined && item.plugin !== tool.plugin)) throw new Error(item.id + " 的工具在运行目录中不可用或来源不匹配。");
     if (!record(item.params)) throw new Error(item.id + " 的 params 须为对象。");
-    const { properties, required, additionalProperties } = tool.inputSchema;
+    const toolSchema: any = record(tool.inputSchema) ? tool.inputSchema : {};
+    const { properties, required, additionalProperties } = toolSchema;
     if (Array.isArray(required) && required.some(key => !Object.hasOwn(item.params as JsonObject, key))) throw new Error(item.id + " 缺少工具必填参数。");
     if (additionalProperties === false && record(properties) && Object.keys(item.params).some(key => !Object.hasOwn(properties, key)))
       throw new Error(item.id + " 含有工具未声明的参数。");
@@ -946,6 +948,8 @@ const toolsSafe = async (): Promise<any[]> => {
         plugin: "",
         danger: "",
         displayName: "",
+        inputSchema: record(item?.function?.parameters) ? item.function.parameters : null,
+        outputSchema: null,
       }))
       .filter((item: any) => item.name);
   }
@@ -2072,6 +2076,9 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       const child = spawn(process.execPath, [script], { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
       child.unref();
       canvasHostPid = child.pid ?? null;
+      const ownerPid = canvasHostPid;
+      // 它自己退了就清记录，避免 PID 被系统复用后，宿主退出时误杀别的进程。
+      child.once("exit", () => { if (canvasHostPid === ownerPid) canvasHostPid = null; });
     } catch (error) {
       canvasError = `拉不起来：${error instanceof Error ? error.message : ""}`;
       return canvasError;
@@ -2281,7 +2288,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       for (const [key, value] of form) if (key.startsWith("p:")) given[key.slice(2)] = value;
       const raw: any = await ctx.tools.call("space_run", {
         id, params: given, confirmSideEffects: form.get("confirmSideEffects") === "on",
-      }, { permission: "full", origin: { plugin: "thinking-space", action: "web_run" } } as any);
+      }, { permission: "ask", origin: { plugin: "thinking-space", action: "web_run" } } as any);
       const result = raw && record(raw) && Object.hasOwn(raw, "result") ? raw.result : raw;
       const runId = result && record(result) && typeof (result as any).runId === "string" ? (result as any).runId : "";
       res.writeHead(303, { Location: back + (runId ? "?ran=" + encodeURIComponent(runId) : "?ran_err=" + encodeURIComponent("没有拿到回执。")) });
