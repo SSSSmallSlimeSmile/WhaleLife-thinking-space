@@ -687,7 +687,11 @@ function renderReceipt(result?: RunResult) {
  * 宿主表单提交发 application/x-www-form-urlencoded，程序调用多半发 application/json；
  * 只认表单的话，JSON 调用会静默拿不到字段。
  */
-type Payload = { get(key: string): string | null };
+type Payload = {
+  get(key: string): string | null;
+  entries(): IterableIterator<[string, string]>;
+  [Symbol.iterator](): IterableIterator<[string, string]>;
+};
 async function readPayload(req: any, limit = 8192): Promise<Payload> {
   const raw = await readBody(req, limit);
   const type = String(req.headers?.["content-type"] ?? "").toLowerCase();
@@ -705,15 +709,25 @@ async function readPayload(req: any, limit = 8192): Promise<Payload> {
   }
   if (!parsed) {
     const form = new URLSearchParams(raw);
-    return { get: (key: string) => form.get(key) };
+    return {
+      get: (key: string) => form.get(key),
+      entries: () => form.entries(),
+      [Symbol.iterator]: () => form.entries(),
+    };
   }
   const body = parsed;
+  const asText = (value: unknown) =>
+    value === undefined || value === null ? "" : typeof value === "string" ? value : JSON.stringify(value);
+  const entries = () =>
+    Object.entries(body).map(([key, value]) => [key, asText(value)] as [string, string])[Symbol.iterator]();
   return {
     get(key: string) {
       const value = body[key];
       if (value === undefined || value === null) return null;
       return typeof value === "string" ? value : JSON.stringify(value);
     },
+    entries,
+    [Symbol.iterator]: entries,
   };
 }
 
