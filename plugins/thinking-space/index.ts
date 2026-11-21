@@ -2040,7 +2040,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html("思维空间", "<p>暂时读不到技能库，请检查插件数据。</p>"));
     }
-  }, { title: "思维空间", navigation: false });
+  }, { title: "思维空间", navigation: true });
   ctx.web.page(pagePath + "space", async (req, res) => {
     try {
       const query = new URL(req.url ?? "/", "http://localhost").searchParams;

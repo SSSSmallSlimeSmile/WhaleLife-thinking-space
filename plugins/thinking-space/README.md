@@ -47,25 +47,18 @@ plugins/thinking-space/
 
 **可选依赖**：技能里引用的工具得真存在，否则保存时校验不过、状态显示「待核实」。第一个示例用到了 `surf_search` / `surf_read`，装 `surf` 才有。
 
-### 一处要手改的地方
+### 导航入口
 
-「管理」分组里的导航入口，目前是**前端硬编码**的：
+插件自己声明导航，**不用改宿主任何文件**：
 
-```html
-<!-- core/ui/index.html，管理组里 -->
-<a href="#extension:/plugins/thinking-space/"
-   data-page="extension:/plugins/thinking-space/"
-   id="space-nav" hidden><span data-icon="cube"></span>
-   <span id="space-nav-label">思维空间</span></a>
+```ts
+ctx.web.page("/plugins/thinking-space/", handler, { title: "思维空间", navigation: true });
 ```
 
-```js
-// core/ui/app.js，render 时
-$("space-nav").hidden = !page;
-```
+装好后侧栏「插件页面」组会出现「思维空间」；点进去是设置主页，技能列表从主页的「查看技能列表」进。
 
-插件自己声明挂哪个导航组的能力，宿主还没有。不改这两处，插件照样能跑，只是入口只在「插件页面」组里。
-
+早期版本曾在 `core/ui/index.html` 和 `app.js` 里硬编码入口（`space-nav` / `thinkingSpaceTitle`），
+现已全部撤掉，仓库里不再需要任何主干改动。
 ---
 
 ## 三、技能长什么样
