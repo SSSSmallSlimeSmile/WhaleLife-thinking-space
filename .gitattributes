@@ -1,0 +1,13 @@
+# 统一行尾，避免不同平台 checkout 出不同内容
+* text=auto eol=lf
+
+# 这两份是网页和脚本，行尾必须一致
+canvas/index.html           text eol=lf
+canvas/whalelife-workbench.cjs text eol=lf
+
+# 图片等二进制
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.zip  binary
