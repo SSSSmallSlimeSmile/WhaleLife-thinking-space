@@ -1850,7 +1850,11 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       for (const step of skill.steps) {
         const tool = catalog.get(step.tool);
         if (!tool || (tool.plugin && tool.plugin !== step.plugin)) unavailable.push(step.id + " " + step.tool);
-        else if (sideEffectTools.has(step.tool) || tool.danger !== "safe") sideEffects = true;
+        else {
+          // 降级（旧宿主没有 catalog）时工具没有 danger，回落到技能自己声明的 danger
+          const danger = tool.danger || skill.danger || "ask";
+          if (sideEffectTools.has(step.tool) || danger !== "safe") sideEffects = true;
+        }
       }
       if (unavailable.length) return blocked(runId, skill.id, "工具不可用：" + unavailable.join("、"),
         skill.steps.map(step => ({ id: step.id, tool: step.tool, plugin: step.plugin, status: "blocked" as RunStatus, elapsedMs: 0, input: null, output: null })));
