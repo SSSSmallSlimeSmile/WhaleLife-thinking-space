@@ -807,7 +807,10 @@ function renderSettings(settings: Settings, stats: { total: number; single: numb
 </section>`;
 }
 function summarize(skill: Skill, catalog: Map<string, ToolContract>, stat?: { runs: number; lastStatus: RunStatus; sources?: { chat?: number; page?: number; user?: number; self?: number } }) {
-  const steps = skill.steps.map(step => ({ ...step, available: catalog.get(step.tool)?.plugin === step.plugin }));
+  const steps = skill.steps.map(step => {
+    const contract = catalog.get(step.tool);
+    return { ...step, available: !!contract && (!contract.plugin || contract.plugin === step.plugin) };
+  });
   let status = "仅声明";
   try { validateSkill(skill.id, skill, catalog); }
   catch { status = "待核实"; }
@@ -1793,7 +1796,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       let sideEffects = false;
       for (const step of skill.steps) {
         const tool = catalog.get(step.tool);
-        if (!tool || tool.plugin !== step.plugin) unavailable.push(step.id + " " + step.tool);
+        if (!tool || (tool.plugin && tool.plugin !== step.plugin)) unavailable.push(step.id + " " + step.tool);
         else if (sideEffectTools.has(step.tool) || tool.danger !== "safe") sideEffects = true;
       }
       if (unavailable.length) return blocked(runId, skill.id, "工具不可用：" + unavailable.join("、"),
@@ -1802,6 +1805,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         return blocked(runId, skill.id, "这条技能含副作用步骤（写入、执行、发送或发声），需要 confirmSideEffects:true 才会跑。",
           skill.steps.map(step => ({ id: step.id, tool: step.tool, plugin: step.plugin, status: "blocked" as RunStatus, elapsedMs: 0, input: null, output: null })));
 
+      const callerPermission = String((session as any)?.permission ?? "ask");
       const stepTimeout = (await readSettings()).stepTimeoutSeconds;
       const steps: StepResult[] = [];
       const previous = new Map<string, unknown>();
@@ -1845,7 +1849,7 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
                 break;
               }
               raw = await withTimeout(ctx.tools.call(step.tool, plan, {
-                id: runId, permission: "full", origin: { plugin: "thinking-space", action: step.id },
+                id: runId, permission: callerPermission, origin: { plugin: "thinking-space", action: step.id },
               } as any), stepTimeout, step.tool);
               elapsedMs = Date.now() - t0;
             } catch (error) {
@@ -2034,6 +2038,11 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
   async function stopCanvas(): Promise<string> {
     const pid = await canvasPid();
     if (!pid) { canvasError = undefined; return "本来就没在跑。"; }
+    // 只停这个实例自己拉起来的进程：端口上跑的可能是不相干的本地服务，不动它。
+    if (canvasHostPid === null || canvasHostPid !== pid) {
+      canvasError = `端口 ${canvasPort} 上的进程（PID ${pid}）不是这个实例启动的，没有动它。要停请自己结束那个进程。`;
+      return canvasError;
+    }
     await ps(`taskkill /PID ${pid} /F`);
     if (await canvasPid()) { canvasError = `停不下来（PID ${pid}）。`; return canvasError; }
     canvasHostPid = null;

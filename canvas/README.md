@@ -33,7 +33,9 @@ node whalelife-workbench.cjs --port 9281 --upstream 9270
 - `--port`：画布监听的端口，默认 9281
 - `--upstream`：宿主端口，默认 9270
 
-设置环境变量 `WORKBENCH_WATCH_PARENT=0` 可以关掉"宿主退出就自己退"的看门狗。
+两个端口也可以走环境变量：`WORKBENCH_PORT` / `WORKBENCH_WHALE_PORT`。命令行参数优先，其次是环境变量，都没有才用默认值。两个端口不能相同。
+
+设置环境变量 `WORKBENCH_WATCH_PARENT=0` 可以关掉"宿主退出就自己退"的看门狗；`WORKBENCH_WATCH_GRACE_MS` 改启动缓冲，默认 15000 毫秒。
 
 ## URL 参数
 
