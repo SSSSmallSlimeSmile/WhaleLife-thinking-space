@@ -2407,8 +2407,99 @@ function renderLibrary(){
 function skillCard(skill){
   const steps=(skill.steps||[]).map(step=>safe(step.tool||step.id)).join(' → ');
   const kindLabel=skill.kind==='composite'?'复合':'单步';
-  return `<article class="card skill-card" data-node-kind="${skill.kind==='composite'?'compound':'function'}"><strong>${safe(skill.name)}</strong><small>${kindLabel} · ${skill.stepCount} 步 · ${safe(skill.danger||'safe')} · ${safe(skill.status||'')} · rev ${skill.revision||0}</small>${steps?`<p class="skill-steps" title="步骤顺序">${steps}</p>`:''}${skill.description?`<p>${safe(skill.description)}</p>`:''}</article>`;
+  const linked=flows.find(flow=>flow.skillId===skill.id);
+  const canvasButton=skill.steps&&skill.steps.length
+    ? `<button type="button" data-action="skill-to-canvas" data-skill="${safe(skill.id)}"${linked?' title="画布上已有一份：'+safe(linked.name)+'"':''}>${linked?'已在画布':'打开画布'}</button>`
+    : '';
+  return `<article class="card skill-card" data-node-kind="${skill.kind==='composite'?'compound':'function'}"><strong>${safe(skill.name)}</strong><small>${kindLabel} · ${skill.stepCount} 步 · ${safe(skill.danger||'safe')} · ${safe(skill.status||'')} · rev ${skill.revision||0}</small>${steps?`<p class="skill-steps" title="步骤顺序">${steps}</p>`:''}${skill.description?`<p>${safe(skill.description)}</p>`:''}${canvasButton?`<div class="actions">${canvasButton}</div>`:''}</article>`;
 }
+function skillToFlow(skill){
+  const steps=Array.isArray(skill&&skill.steps)?skill.steps:[];
+  if(!steps.length)return null;
+  const refMap={};
+  steps.forEach((step,k)=>{if(step&&step.id!=null)refMap[String(step.id)]='n'+k;});
+  const remapRefs=v=>{
+    if(typeof v==='string'){
+      return v.replace(/\$\{([^}.\s]+)\./g,(m,key)=>refMap[key]?('${'+refMap[key]+'.'):m)
+              .replace(/\$\{([^}\s]+)\}/g,(m,key)=>refMap[key]?('${'+refMap[key]+'}'):m);
+    }
+    if(Array.isArray(v))return v.map(remapRefs);
+    if(v&&typeof v==='object'){const out={};for(const k of Object.keys(v))out[k]=remapRefs(v[k]);return out;}
+    return v;
+  };
+  const missing=[];
+  const nodes=steps.map((step,k)=>{
+    const type=String(step&&step.tool||'').trim();
+    if(type&&!getTool(type)&&!Object.hasOwn(whaleTools,type)&&!importedTools.has(type)&&!tools.some(item=>item.id===type)){
+      // 写进工程本身的工具列表，刷新后节点还认得它；同步插件库时宿主真装了就换成真的。
+      tools.push({id:type,name:type,plugin:String(step.plugin||'未登记'),category:'工具',placeholder:true,output:'结果'});
+      missing.push(type);
+    }
+    return {id:'n'+k,type,x:36+k*216,y:92+(k%2)*105,params:remapRefs(step&&step.params||{})};
+  });
+  const index=new Map(steps.map((step,k)=>[step&&step.id,k]));
+  const edges=[];
+  steps.forEach((step,k)=>{
+    if(step&&step.next!=null&&index.has(step.next))edges.push(['n'+k,'n'+index.get(step.next),'after']);
+  });
+  let refCount=0;
+  for(const node of nodes){
+    const serialized=JSON.stringify(node.params||{});
+    refCount+=(serialized.match(/\$\{n\d[\w.\[\]]*\}/g)||[]).length;
+  }
+  const flow={
+    id:crypto.randomUUID(),
+    name:uniqueCanvasName(String(skill.name||skill.id||'技能')),
+    nodes,edges,
+    compound:skill.kind==='composite',
+    skillId:String(skill.id||''),
+    skillRevision:Number(skill.revision||0),
+    skillSyncedAt:new Date().toISOString(),
+  };
+  return {flow,missing,refCount};
+}
+async function openSkillInCanvas(skillId){
+  const id=String(skillId||'').trim();
+  if(!id)return {ok:false,message:'缺少技能 id'};
+  const existing=flows.find(flow=>flow.skillId===id);
+  if(existing){
+    openFlowCanvas(existing.id);
+    showDialog('打开画布',`<p>「${safe(existing.name)}」已经在画布上了。</p><p class="muted">一条技能只画一次。要在它基础上做变体，用画布的「保存画布 · 新建功能」复制一份。</p><div class="actions">${closeButton}</div>`);
+    return {ok:true,flowId:existing.id,reused:true};
+  }
+  let skill=null;
+  try{
+    const res=await fetch('/plugins/thinking-space/skill?id='+encodeURIComponent(id)+'&t='+Date.now(),{credentials:'same-origin',cache:'no-store'});
+    if(!res.ok)throw new Error('宿主返回 HTTP '+res.status);
+    const payload=await res.json();
+    skill=payload&&payload.skill;
+    if(!skill)throw new Error(payload&&payload.error?String(payload.error):'没拿到技能定义');
+  }catch(error){
+    const message=error instanceof Error?error.message:String(error);
+    showDialog('打开画布',`<p>没读成这条技能：${safe(message)}</p><p class="muted">检查 WhaleLife 是否在跑、thinking-space 插件是否还装着。</p><div class="actions">${closeButton}</div>`);
+    return {ok:false,message};
+  }
+  const built=skillToFlow(skill);
+  if(!built){
+    showDialog('打开画布',`<p>这条技能没有步骤，画布上没东西可画。</p><div class="actions">${closeButton}</div>`);
+    return {ok:false,message:'技能没有步骤'};
+  }
+  const {flow,missing,refCount}=built;
+  flows.push(flow);open.push(flow.id);saveWorkflowRevision(flow);
+  if(!persist()){
+    flows.pop();open.pop();delete workflowRevisions[flow.id];
+    showDialog('打开画布',`<p>浏览器未能保存画布。</p><div class="actions">${closeButton}</div>`);
+    return {ok:false,message:'浏览器未能保存'};
+  }
+  changeTab(flow.id);
+  const lineRef=refCount?`其中 ${refCount} 处参数引用了上游步骤`:'参数里没有跨步骤引用';
+  const missingLine=missing.length
+    ? `<p>这些工具画布上还没有，先按占位节点放着：${missing.map(name=>'<code>'+safe(name)+'</code>').join('、')}。</p><p class="muted">点工具库的「同步插件库」，宿主装了对应插件就会补上端口和参数。</p>`
+    : '';
+  showDialog('打开画布',`<p>已画出 ${flow.nodes.length} 个节点、${flow.edges.length} 条连线，${lineRef}。</p>${missingLine}<p class="muted">这是技能定义的一次性展开：之后在画布上改，不会写回宿主技能库；要回写，用「发布到思维空间」。</p><div class="actions">${closeButton}</div>`);
+  return {ok:true,flowId:flow.id,missing,refCount};
+}
+
 function renderSkillLibrary(){
   if(!hostSkillsTried){hostSkillsTried=true;void syncHostSkills({silent:true});}
   const list=Array.isArray(hostSkills)?hostSkills:null;
@@ -3028,6 +3119,7 @@ document.addEventListener('click',event=>{
     case 'open-market':{const w=window.open('/market/','_blank','noopener');if(!w)location.href='/market/';break;}
     case 'sync-plugin-library':void syncPluginLibrary();break;
     case 'sync-host-skills':void syncHostSkills();break;
+    case 'skill-to-canvas':void openSkillInCanvas(button.dataset.skill);break;
     case 'restore-builtin':library.hostOnly=false;library.mode='all';library.filter='';library.query='';render();break;
     case 'tool':
       if(tool.inventory){showInventory(tool.inventory,contractFor(tool));break;}
