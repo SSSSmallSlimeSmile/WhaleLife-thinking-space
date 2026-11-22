@@ -912,6 +912,8 @@ export function apply(ctx: Context) {
   sweepUninstalled();
   const traces = new Map<string, RunResult>();
   const traceTtl = 60 * 60 * 1000;
+  const taskRuns = new Map<string, { runId: string; at: number }>();
+  const TASK_REUSE_MS = 60 * 60 * 1000;
   function remember(id: string, value: RunResult) {
     traces.set(id, value);
     const cutoff = Date.now() - traceTtl;
@@ -1858,10 +1860,18 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       properties: {
         id: { type: "string" },
         params: { type: "object" },
+        taskId: { type: "string", description: "任务 ID，可省略。同一个 ID 重复提交只回查已有结果，不会重新执行；超时后先查再决定要不要重跑。" },
         confirmSideEffects: { type: "boolean", description: "链中含副作用步骤时必须显式为 true。" },
         via: { type: "string", enum: ["user", "self"], description: "谁发起的，只用于统计：用户明确点名这条技能填 user；自己判断该用填 self（默认）。" },
       } },
     async run(args, session) {
+      const taskId = String((args as any)?.taskId ?? "").trim().slice(0, 80);
+      if (taskId) {
+        const prior = taskRuns.get(taskId);
+        const cached = prior && Date.now() - prior.at < TASK_REUSE_MS ? traces.get(prior.runId) : undefined;
+        if (cached) return { ...(cached as any), reusedTask: taskId,
+          note: "任务 " + taskId + " 已经跑过，返回当时的结果，没有重新执行。" } as any;
+      }
       const runId = "run_" + Date.now().toString(36) + "_" + (++runSeq);
       const settings = await readSettings();
       if (!settings.allowUse) return blocked(runId, args?.id ?? "", "设置里关掉了「允许使用整理好的技能」。");
@@ -2038,6 +2048,8 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         }
       } catch { /* 读不回来不影响结果 */ }
       remember(runId, result);
+      // 只记跑完的：参数没填全就拦下的不记，否则填错一次就再也跑不动了。
+      if (taskId) taskRuns.set(taskId, { runId, at: Date.now() });
       if (lastStatus === "ok") {
         await bumpCandidates(skill.id, steps);
         const plan = await planTrim(skill.id, steps, startRevision);
