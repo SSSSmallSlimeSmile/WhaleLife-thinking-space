@@ -40,6 +40,8 @@ const DEFAULTS = {
   canvasScript: "",
   /** 思维空间停掉时，画布进程一起收掉。默认开。 */
   stopWithSpace: true,
+  /** 本实例的归属标识：只用来认自己拉起来的画布，不进设置页。 */
+  ownerToken: "",
 };
 type Config = typeof DEFAULTS;
 
@@ -92,8 +94,14 @@ export async function apply(ctx: Context) {
         port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULTS.port,
         canvasScript: script,
         stopWithSpace: saved?.stopWithSpace !== false,
+        ownerToken: typeof saved?.ownerToken === "string" ? saved.ownerToken.trim() : "",
       };
     } catch { /* 读不到就用默认 */ }
+    // 归属标识要跨重载存活：重载后 canvasHostPid 没了，但进程还是这个实例拉起来的。
+    if (!/^[0-9a-f]{8,32}$/.test(cfg.ownerToken)) {
+      cfg.ownerToken = randomUUID().replace(/-/g, "").slice(0, 16);
+      try { await ctx.config.save("config.json", cfg); } catch { /* 存不下就先用本次的 */ }
+    }
   };
   await load();
 
@@ -130,6 +138,18 @@ export async function apply(ctx: Context) {
     return result.out.trim();
   }
 
+  /** 从命令行里取归属标识。光比脚本名不够：两个实例跑的是同一个 whalelife-workbench.cjs。 */
+  function claimOf(cmd: string): string {
+    const found = /--owner\s+([0-9a-zA-Z_-]+)/.exec(cmd);
+    return found ? found[1] : "";
+  }
+
+  /** 这个 PID 是不是本实例亲手拉起来的。PID 会被系统复用，所以每次都重读命令行。 */
+  async function isOurs(pid: number): Promise<boolean> {
+    if (!cfg.ownerToken) return false;
+    return claimOf(await cmdlineOf(pid)) === cfg.ownerToken;
+  }
+
   /** 读宿主自己的端口：config/config.json 里的 web.port 才是准的。 */
   function locateUpstream(port: number): { root: string; port: number } | null {
     const argRoots = process.argv
@@ -163,6 +183,7 @@ export async function apply(ctx: Context) {
     return {
       running: !!pid,
       pid,
+      owned: pid ? await isOurs(pid) : false,
       port: cfg.port,
       upstreamPort: upstream?.port ?? null,
       script: locateScript(),
@@ -173,14 +194,25 @@ export async function apply(ctx: Context) {
 
   async function start(): Promise<string> {
     const running = await canvasPid();
-    if (running) { canvasHostPid = running; canvasError = undefined; return `画布已经在跑了（PID ${running}，端口 ${cfg.port}）。`; }
+    if (running) {
+      if (await isOurs(running)) {
+        canvasHostPid = running;
+        canvasError = undefined;
+        return `画布已经在跑了（PID ${running}，端口 ${cfg.port}，本实例启动的）。`;
+      }
+      const cmd = await cmdlineOf(running);
+      canvasError = `端口 ${cfg.port} 已经被别的进程占着（PID ${running}），不是这个实例启动的画布，没有接管它。\n`
+        + `命令行：${cmd || "（读不到）"}\n`
+        + `把端口改成别的，或者先自己把它停掉再启动。`;
+      return canvasError;
+    }
     const script = locateScript();
     if (!script) { canvasError = "找不到画布脚本：插件目录里没有 " + scriptName + "，也没在设置里指定路径。"; return canvasError; }
     if (!existsSync(script)) { canvasError = `找不到脚本：${script}`; return canvasError; }
     const upstream = locateUpstream(cfg.port);
     if (!upstream) { canvasError = "读不到宿主端口：没找到带 web.port 的 config/config.json。画布不起来，免得连到别的实例上。"; return canvasError; }
     try {
-      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream", String(upstream.port)],
+      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream", String(upstream.port), "--owner", cfg.ownerToken],
         { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
       child.unref();
       canvasHostPid = child.pid ?? null;
@@ -201,13 +233,13 @@ export async function apply(ctx: Context) {
 
   async function stop(): Promise<string> {
     const pid = await canvasPid();
-    if (!pid) { canvasError = undefined; return "本来就没在跑。"; }
-    if (canvasHostPid !== pid) {
+    if (!pid) { canvasHostPid = null; canvasError = undefined; return "本来就没在跑。"; }
+    if (!(await isOurs(pid))) {
       const cmd = await cmdlineOf(pid);
-      if (!cmd || !new RegExp(scriptName.replace(/\./g, "\\."), "i").test(cmd)) {
-        canvasError = `端口 ${cfg.port} 上的进程（PID ${pid}）看起来不是画布脚本，没有动它。命令行：${cmd || "（读不到）"}`;
-        return canvasError;
-      }
+      canvasError = `端口 ${cfg.port} 上的进程（PID ${pid}）不是这个实例启动的画布，没有动它。\n`
+        + `命令行：${cmd || "（读不到）"}\n`
+        + `是另一个实例的画布就去那个实例里停；是你自己开的就手动结束。`;
+      return canvasError;
     }
     await ps(`taskkill /PID ${pid} /F | Out-Null`);
     if (await canvasPid()) { canvasError = `停不下来（PID ${pid}）。`; return canvasError; }
@@ -218,13 +250,25 @@ export async function apply(ctx: Context) {
 
   // 跟着思维空间走：父插件停 → 宿主先停子插件 → 这里把画布进程一起收掉。
   // 用同步 taskkill：插件 stop 只等一眼，异步 PowerShell 来不及。
+  /** 同步取命令行：插件 stop 只等一眼，异步 PowerShell 来不及。 */
+  function cmdlineSync(pid: number): string {
+    try {
+      const out = spawnSync("powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue).CommandLine`],
+        { windowsHide: true, timeout: 8000, encoding: "utf8" });
+      return String(out.stdout ?? "");
+    } catch { return ""; }
+  }
+
   ctx.effect(() => () => {
     if (!cfg.stopWithSpace) return;
     const pid = canvasHostPid;
+    canvasHostPid = null;
     if (!pid) return;
+    // 退出时也要确认归属：画布可能先退了、PID 被系统复用，攒着旧 PID 就杀会误伤。
+    if (!cfg.ownerToken || claimOf(cmdlineSync(pid)) !== cfg.ownerToken) return;
     try { spawnSync("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true, stdio: "ignore" }); }
     catch { /* 已经退了就算了 */ }
-    canvasHostPid = null;
   });
 
   ctx.tools.register({
@@ -243,7 +287,7 @@ export async function apply(ctx: Context) {
 
   ctx.tools.register({
     name: "canvas_stop", displayName: "停止画布", danger: "ask",
-    description: "停掉端口上的画布进程。命令行看起来不是画布脚本时拒绝，不误杀本地别的服务。",
+    description: "停掉本实例拉起来的画布进程。命令行里没有本实例归属标识时拒绝，不误杀别的实例或本地别的服务。",
     schema: { type: "object", properties: {}, additionalProperties: false },
     async run() { const note = await stop(); return { status: canvasError ? "failed" : "ok", note, ...(await state()) }; },
   });
@@ -252,7 +296,7 @@ export async function apply(ctx: Context) {
     return html("思维画布", `${note ? `<p class="notice">${escape(note)}</p>` : ""}
 <section class="panel">
   <h2>状态</h2>
-  <p><span class="badge${current.running ? "" : " warn"}">${current.running ? `运行中 · PID ${current.pid}` : "没在跑"}</span><span class="badge">端口 ${current.port}</span><span class="badge">连宿主 ${current.upstreamPort ?? "没读到"}</span></p>
+  <p><span class="badge${current.running ? "" : " warn"}">${current.running ? `运行中 · PID ${current.pid}` : "没在跑"}</span><span class="badge">端口 ${current.port}</span><span class="badge">连宿主 ${current.upstreamPort ?? "没读到"}</span>${current.running ? `<span class="badge${current.owned ? "" : " warn"}">${current.owned ? "本实例启动" : "别的实例/外部进程"}</span>` : ""}</p>
   <p class="muted">画布是独立的 node 脚本，开机不会自己起来。要用的时候点启动，不用了点停止。${current.error ? `上次出错：${escape(current.error)}` : ""}</p>
   <p class="muted">脚本：<code>${escape(current.script || "（没找到）")}</code></p>
   <p>
@@ -316,7 +360,7 @@ export async function apply(ctx: Context) {
       const nextPort = Number.isInteger(rawPort) && rawPort >= 1024 && rawPort <= 65535 ? rawPort : cfg.port;
       const script = String(form.get("canvasScript") ?? "").trim().slice(0, 500);
       const stopWithSpace = form.get("stopWithSpace") === "on";
-      cfg = { port: nextPort, canvasScript: script, stopWithSpace };
+      cfg = { port: nextPort, canvasScript: script, stopWithSpace, ownerToken: cfg.ownerToken };
       await ctx.config.save("config.json", cfg);
       note = "设置存下了。端口改动要重启画布才生效。";
     } catch (error) {
