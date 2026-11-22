@@ -3029,8 +3029,6 @@ document.addEventListener('click',event=>{
     case 'sync-plugin-library':void syncPluginLibrary();break;
     case 'sync-host-skills':void syncHostSkills();break;
     case 'restore-builtin':library.hostOnly=false;library.mode='all';library.filter='';library.query='';render();break;
-    case 'inventory-report':
-      showDialog('接口盘点原文',`<pre class="inventory-source">${safe(inventory.report)}</pre><div class="actions">${closeButton}</div>`);break;
     case 'tool':
       if(tool.inventory){showInventory(tool.inventory,contractFor(tool));break;}
       if(inventoryToolsByName.has(tool.id)){showInventory(inventoryToolsByName.get(tool.id),contractFor(tool));break;}
