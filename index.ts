@@ -108,11 +108,15 @@ function validateValue(value: unknown, params: Set<string>, previous: Set<string
   if (depth > 10) throw new Error("参数嵌套过深。");
   if (typeof value === "string") {
     if (!value.includes("${")) return;
-    const match = /^\$\{([^{}]+)\}$/.exec(value);
-    const path = match && referencePattern.exec(match[1]);
-    if (!path || path[0].split(/[.\[\]]/).some(unsafeKey) ||
-      (path[2] ? !previous.has(path[1]) : !params.has(path[1])))
-      throw new Error("占位须使用已声明参数或前序步骤字段，例如 ${关键词} 或 ${n1.data.results[0].url}。");
+    const whole = /^\$\{([^{}]+)\}$/.exec(value);
+    const inners = whole ? [whole[1]] : [...value.matchAll(/\$\{([^{}]+)\}/g)].map(m => m[1]);
+    if (!inners.length) throw new Error("占位须使用已声明参数或前序步骤字段，例如 ${关键词} 或 ${n1.data.results[0].url}。");
+    for (const inner of inners) {
+      const path = referencePattern.exec(inner);
+      if (!path || path[0].split(/[.\[\]]/).some(unsafeKey) ||
+        (path[2] ? !previous.has(path[1]) : !params.has(path[1])))
+        throw new Error("占位须使用已声明参数或前序步骤字段，例如 ${关键词} 或 ${n1.data.results[0].url}。");
+    }
     return;
   }
   if (Array.isArray(value)) {
