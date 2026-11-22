@@ -45,12 +45,13 @@ function makeHost() {
   writeFileSync(join(root, "plugin.yaml"), "id: thinking-space\nname: 思维空间\nsub: [canvas]\n", "utf8");
 
   const tools = [];          // 宿主里现存的工具
+  const probe = { version: "0.1.0" };  // 假探针回的版本，升版用例里要跟着改
   const pages = [];
   const apis = [];
   const ctx = {
     logger: { info() {}, warn() {}, error() {} },
     tools: {
-      call: async (name) => ({ ok: true, result: { status: "ok", tool: name, version: "0.1.0" } }),
+      call: async (name) => ({ ok: true, result: { status: "ok", tool: name, version: probe.version } }),
     },
     web: {
       page: (path, handler, entry) => { pages.push({ path, handler, entry }); },
@@ -66,7 +67,7 @@ function makeHost() {
     escape: (v) => String(v ?? ""),
     html: (t, b) => t + b,
   };
-  return { root, tools, pages, apis, ctx, hooks };
+  return { root, tools, probe, pages, apis, ctx, hooks };
 }
 
 function request(body) {
@@ -96,6 +97,12 @@ check("首次发布写了两个文件",
   existsSync(join(host.root, "sub", "skill-pub-check-demo", "plugin.yaml")));
 check("父清单登记了子插件", readFileSync(join(host.root, "plugin.yaml"), "utf8").includes("sub: [canvas, skill-pub-check-demo]"));
 check("首次发布没备份目录", res.body?.backup === null);
+const pendingAfterPublish = JSON.parse(readFileSync(join(host.root, "data", "publish-pending.json"), "utf8"));
+check("发布后留了作业记录，阶段 written",
+  pendingAfterPublish.jobs.length === 1 && pendingAfterPublish.jobs[0].phase === "written",
+  JSON.stringify(pendingAfterPublish.jobs.map((job) => job.phase)));
+check("作业记录带着发布 id 和备份位置",
+  pendingAfterPublish.jobs[0].publishId === res.body?.publishId && pendingAfterPublish.jobs[0].backup === null);
 
 // 2) 没重载就验收 → 工具不在 → 失败
 res = response();
@@ -109,6 +116,8 @@ res = response();
 await verifyRoute(request({ subId: "skill-pub-check-demo" }), res);
 check("重载后验收通过", res.body?.ok === true && res.body?.stage === "verified", JSON.stringify(res.body).slice(0, 160));
 check("探针回了版本", res.body?.version === "0.1.0");
+check("验收通过后销掉作业记录",
+  JSON.parse(readFileSync(join(host.root, "data", "publish-pending.json"), "utf8")).jobs.length === 0);
 
 // 4) 同内容重复发布 → 复用，不写不重载
 const beforeText = readFileSync(join(host.root, "sub", "skill-pub-check-demo", "index.ts"), "utf8");
@@ -127,6 +136,7 @@ res = response();
 await publishRoute(request({ skillId: "pub-check-demo" }), res);
 check("新版本写进去了", res.body?.ok === true && res.body?.version === "0.1.1", JSON.stringify(res.body).slice(0, 160));
 check("新版本内容确实变了", readFileSync(join(host.root, "sub", "skill-pub-check-demo", "index.ts"), "utf8") !== beforeText);
+host.probe.version = "0.1.1";
 
 // 模拟新版加载失败：工具从宿主里消失
 host.tools.length = 0;
@@ -167,7 +177,7 @@ writeFileSync(join(host3.root, "sub", "skill-pub-check-demo", "index.ts"), "// b
 mod.registerSkillPublish(host3.ctx, host3.hooks);
 const healed = JSON.parse(readFileSync(join(host3.root, "data", "publishes.json"), "utf8"));
 const record = healed.items.find((item) => item.subId === "skill-pub-check-demo");
-check("启动自愈把记录标成失败", record?.stage === "failed", String(record?.stage));
+check("启动自愈把记录标成撤回", record?.stage === "withdrawn", String(record?.stage));
 check("启动自愈撤掉了坏目录", !existsSync(join(host3.root, "sub", "skill-pub-check-demo")));
 check("启动自愈撤掉了清单登记", !readFileSync(join(host3.root, "plugin.yaml"), "utf8").includes("skill-pub-check-demo"));
 

@@ -62,11 +62,34 @@ type PublishRecord = {
   replacedVersion?: string | null;
   /** 父清单的备份目录（同一个 stamp 目录）。 */
   manifestBackup: string;
+  /** 这一版是哪一次发布写下去的，前端拿它对账，避免旧页面回退别的轮次。 */
+  publishId?: string;
   reason?: string;
   history: { at: string; action: string; note?: string }[];
 };
 
 type PublishFile = { schemaVersion: 1; items: PublishRecord[] };
+
+/**
+ * 发布作业。放在改正式目录之前落盘：宿主半路退出时，靠它认回「该退到哪一版」。
+ * 没有它，旧目录已经删掉、登记还没写，重启时就不知道备份是给谁的。
+ */
+type JobPhase = "preparing" | "written";
+type PendingJob = {
+  publishId: string;
+  subId: string;
+  skillId: string;
+  version: string;
+  /** 首次发布：没有旧目录可退，只能撤回。 */
+  first: boolean;
+  /** 旧目录备份目录名，相对 data/publish-backups/；首次发布为 null。 */
+  backup: string | null;
+  manifestBackup: string;
+  phase: JobPhase;
+  at: string;
+  note?: string;
+};
+type PendingFile = { schemaVersion: 1; jobs: PendingJob[] };
 
 const SUB_PREFIX = "skill-";
 /** 模板版本。模板改了就把这个加一，否则同一个技能会因为「指纹没变」被判定成复用。 */
@@ -432,6 +455,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
   const dataDir = join(hooks.here, "data");
   const subRoot = join(hooks.here, "sub");
   const registryFile = join(dataDir, "publishes.json");
+  const pendingFile = join(dataDir, "publish-pending.json");
   const stagingRoot = join(dataDir, "publish-staging");
   const backupRoot = join(dataDir, "publish-backups");
   const manifestFile = join(hooks.here, "plugin.yaml");
@@ -456,6 +480,33 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
     record.history = [...(record.history ?? []), { at: new Date().toISOString(), action, ...(note ? { note } : {}) }].slice(-20);
   }
 
+  function readPending(): PendingFile {
+    try {
+      const parsed = JSON.parse(readFileSync(pendingFile, "utf8"));
+      if (parsed?.schemaVersion === 1 && Array.isArray(parsed.jobs)) return parsed;
+    } catch { /* 没有或坏了，当空 */ }
+    return { schemaVersion: 1, jobs: [] };
+  }
+  function writePending(next: PendingFile) {
+    mkdirSync(dataDir, { recursive: true });
+    // 和发布登记一样：先写临时文件再改名，写一半断电不会留下半份 json。
+    const temp = pendingFile + ".tmp";
+    writeFileSync(temp, JSON.stringify(next, null, 2), "utf8");
+    renameSync(temp, pendingFile);
+  }
+  function saveJob(job: PendingJob) {
+    const file = readPending();
+    file.jobs = file.jobs.filter((item) => item.subId !== job.subId && item.publishId !== job.publishId);
+    file.jobs.push(job);
+    writePending(file);
+  }
+  function dropJob(publishId: string) {
+    if (!publishId) return;
+    const file = readPending();
+    const jobs = file.jobs.filter((item) => item.publishId !== publishId);
+    if (jobs.length !== file.jobs.length) writePending({ schemaVersion: 1, jobs });
+  }
+
   function dirOf(subId: string) {
     return join(subRoot, subId);
   }
@@ -468,8 +519,11 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
     return next;
   }
 
-  /** 用备份铺回去。备份不存在 = 首次发布，直接撤掉。 */
-  function restoreFrom(record: PublishRecord) {
+  /**
+   * 用备份铺回去。备份不存在 = 首次发布，直接撤掉。
+   * 清单只动这一次发布涉及的条目：整份回拷会把之后别的发布一起抹掉。
+   */
+  function restoreFrom(record: { subId: string; backup: string | null }) {
     const dir = dirOf(record.subId);
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     if (record.backup) {
@@ -477,13 +531,12 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
       if (!existsSync(from)) throw new Error("备份目录不在了：" + from);
       cpSync(from, dir, { recursive: true });
     }
-    const manifestBackup = join(backupRoot, record.manifestBackup, "plugin.yaml");
-    if (existsSync(manifestBackup)) copyFileSync(manifestBackup, manifestFile);
-    else {
-      // 没有清单备份就按记录把登记撤掉，别把清单留在半截状态。
-      const current = readFileSync(manifestFile, "utf8");
-      writeFileSync(manifestFile, removeFromManifest(current, record.subId), "utf8");
-    }
+    const current = readFileSync(manifestFile, "utf8");
+    // 退回去的那一版本来就登记着，所以有备份时是「确保仍在」，首次发布才是「拿掉」。
+    const next = record.backup
+      ? addToManifest(current, record.subId)
+      : removeFromManifest(current, record.subId);
+    if (next !== current) writeFileSync(manifestFile, next, "utf8");
   }
 
   /** 静态自检：目录在、入口在、清单登记在。启动时先跑这个，不依赖子插件能不能加载。 */
@@ -525,6 +578,93 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
     if (changed) writeRegistry(registry);
   }
 
+  /** 盘上这一版的版本号；读不到返回 null。 */
+  function versionOnDisk(subId: string): string | null {
+    try {
+      const manifest = readFileSync(join(subRoot, subId, "plugin.yaml"), "utf8");
+      return /^version:\s*(.+)$/m.exec(manifest)?.[1]?.trim() ?? null;
+    } catch { return null; }
+  }
+  function manifestHas(subId: string) {
+    try {
+      const manifest = readFileSync(manifestFile, "utf8");
+      return new RegExp("^sub:\\s*\\[.*\\b" + subId + "\\b.*\\]", "m").test(manifest);
+    } catch { return false; }
+  }
+  /** 目录里的入口、版本，加上父清单登记，三样都已经是这一版。 */
+  function writtenAs(job: PendingJob) {
+    const entry = join(subRoot, job.subId, "index.ts");
+    if (!existsSync(entry)) return false;
+    try {
+      if (!readFileSync(entry, "utf8").includes(toolNameFor(job.subId))) return false;
+    } catch { return false; }
+    if (versionOnDisk(job.subId) !== job.version) return false;
+    return manifestHas(job.subId);
+  }
+  function markRolledBack(job: PendingJob, reason: string) {
+    const registry = readRegistry();
+    let record = registry.items.find((item) => item.subId === job.subId) ?? null;
+    if (!record) {
+      // 半路退出时登记还没写。补一条，备份位置和原因不能丢，接手的人得看得见。
+      record = {
+        subId: job.subId, skillId: job.skillId, toolName: toolNameFor(job.subId),
+        displayName: job.skillId, version: job.version, danger: "ask", fingerprint: "",
+        stage: "failed", at: new Date().toISOString(), backup: job.backup,
+        manifestBackup: job.manifestBackup, history: [], publishId: job.publishId,
+      };
+      registry.items.push(record);
+    }
+    record.fingerprint = "";
+    record.stage = job.first ? "withdrawn" : "rolled-back";
+    record.reason = reason;
+    pushHistory(record, job.first ? "withdraw" : "rollback", reason);
+    writeRegistry(registry);
+  }
+  /** 把半截发布退回去：目录、清单、登记三样都要对齐，退成功了才销掉作业记录。 */
+  function rollbackJob(job: PendingJob, reason: string) {
+    restoreFrom({ subId: job.subId, backup: job.backup });
+    markRolledBack(job, reason);
+  }
+  /**
+   * 启动时先看有没有半截的发布。
+   * 可重复跑：已经退干净的再跑一次只是重新铺一遍同样的文件，不会多删东西。
+   */
+  function recoverPending() {
+    let file: PendingFile;
+    try { file = readPending(); } catch { return; }
+    if (!file.jobs.length) return;
+    const keep: PendingJob[] = [];
+    for (const job of file.jobs) {
+      try {
+        const written = writtenAs(job);
+        if (job.phase === "preparing") {
+          if (written) {
+            job.phase = "written";
+            job.note = "上次发布写完文件和清单，但没走到重载。";
+            keep.push(job);
+            ctx.logger.warn("思维空间：技能壳 " + job.subId + " 停在待重载，保留记录等核对。");
+          } else {
+            rollbackJob(job, "上次发布在替换中途中断，已回退");
+            ctx.logger.warn("思维空间：技能壳 " + job.subId + " 上次发布半路中断，已回退。");
+          }
+        } else if (written) {
+          job.note = "上次发布已写入，还没验收。";
+          keep.push(job);
+          ctx.logger.warn("思维空间：技能壳 " + job.subId + " 上次发布还没验收（v" + job.version + "）。");
+        } else {
+          rollbackJob(job, "上次发布文件或清单不完整，已回退");
+          ctx.logger.warn("思维空间：技能壳 " + job.subId + " 的文件与清单对不上，已回退。");
+        }
+      } catch (error) {
+        job.note = "恢复失败：" + (error instanceof Error ? error.message : String(error));
+        keep.push(job);
+        ctx.logger.error("思维空间：技能壳 " + job.subId + " 恢复失败", error);
+      }
+    }
+    writePending({ schemaVersion: 1, jobs: keep });
+  }
+
+  recoverPending();
   healOnBoot();
 
   async function probe(record: PublishRecord) {
@@ -540,13 +680,20 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
       return { ok: false, reason: "探针调不动：" + (error instanceof Error ? error.message : String(error)), present, hasProbe, probe: null };
     }
     const payload = answer?.result ?? null;
-    const ok = answer?.ok === true && payload?.status === "ok";
+    const got = String(payload?.version ?? "");
+    const want = String(record.version ?? "");
+    const answered = answer?.ok === true && payload?.status === "ok";
+    // 工具在、探针也回话还不够：版本得是这一版，否则内存里跑的还是旧壳。
+    const ok = answered && (!want || got === want);
     return {
       ok,
-      reason: ok ? "" : "探针没回 ok：" + JSON.stringify(answer ?? null).slice(0, 200),
+      reason: answered
+        ? (ok ? "" : "探针返回 v" + (got || "?") + "，目标 v" + want)
+        : "探针没回 ok：" + JSON.stringify(answer ?? null).slice(0, 200),
       present, hasProbe,
       probe: payload,
       version: payload?.version ?? null,
+      expectedVersion: want,
     };
   }
 
@@ -631,8 +778,27 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
     const hadDir = existsSync(dir);
     if (hadDir) cpSync(dir, join(backupDir, "dir"), { recursive: true });
 
+    // 2.5) 先落盘作业记录，再碰正式目录。写不进去就不发布，旧版原样留着。
+    const publishId = stampId;
+    const job: PendingJob = {
+      publishId, subId, skillId, version, first: !hadDir,
+      backup: hadDir ? stampId : null, manifestBackup: stampId,
+      phase: "preparing", at: new Date().toISOString(),
+    };
+    try {
+      saveJob(job);
+    } catch (error) {
+      return {
+        ok: false,
+        error: "恢复记录写不进去，已停止发布（旧版没动）：" + (error instanceof Error ? error.message : String(error)),
+      };
+    }
+
     // 3) 搬进 sub/，把旧 data/ 带过去（配置、调用记录不能因为换版本丢）。
     if (hadDir) rmSync(dir, { recursive: true, force: true });
+    // 测试专用：在隔离实例里让进程停在「旧目录已移走、新文件还没写」这一刻。
+    // 只在环境变量显式打开时生效，正常跑不会碰到。
+    if (process.env.WL_PUBLISH_FAULT === "exit-after-remove") process.exit(37);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "index.ts"), rendered.source, "utf8");
     writeFileSync(join(dir, "plugin.yaml"), rendered.manifest, "utf8");
@@ -661,6 +827,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
     record.backup = hadDir ? stampId : null;
     record.replacedVersion = known ? known.version : null;
     record.manifestBackup = stampId;
+    record.publishId = publishId;
     record.reason = undefined;
     pushHistory(record, known ? "republish" : "publish", `v${version}`);
     const items = registry.items.filter((item) => item.subId !== subId);
@@ -669,8 +836,15 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
 
     rmSync(stageDir, { recursive: true, force: true });
 
+    // 6) 文件和清单都写完了，阶段推到「等重载验收」。记录还在，验收或回退之后才销。
+    try {
+      job.phase = "written";
+      saveJob(job);
+    } catch {
+      // 文件已经落地，记录写失败不推翻这次发布：启动自检还能兜住不一致的情况。
+    }
     return {
-      ok: true, reused: false, subId, toolName: rendered.toolName, version,
+      ok: true, reused: false, subId, toolName: rendered.toolName, version, publishId,
       stage: record.stage, wroteFiles: 2, reloaded: false,
       backup: record.backup, manifestBackup: stampId,
       needsReload: true, reloadId: hooks.parentId,
@@ -701,6 +875,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         record.at = new Date().toISOString();
         pushHistory(record, "verify", `v${record.version} 探针返回 ${String(result.version ?? "")}`);
         writeRegistry(registry);
+        dropJob(record.publishId ?? "");
       }
       return send(res, 200, { ...result, subId, toolName: record.toolName, version: result.version ?? record.version, stage: record.stage });
     } catch (error) {
@@ -741,6 +916,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         record.reason = reason || (first ? "首次发布撤回" : "回退到上一版");
         pushHistory(record, first ? "withdraw" : "rollback", record.reason);
         writeRegistry(registry);
+        dropJob(record.publishId ?? "");
         return {
           ok: true, subId, stage: record.stage, removed: first, restored: !first,
           backup: record.manifestBackup, needsReload: true, reloadId: hooks.parentId,
@@ -761,11 +937,15 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
       const items = registry.items.map((record) => ({
         subId: record.subId, skillId: record.skillId, toolName: record.toolName,
         displayName: record.displayName, version: record.version, stage: record.stage,
-        at: record.at, reason: record.reason ?? null,
+        at: record.at, reason: record.reason ?? null, publishId: record.publishId ?? null,
         present: tools.some((tool) => tool.name === record.toolName),
         history: record.history.slice(-5),
       }));
-      return send(res, 200, { ok: true, items });
+      const pending = readPending().jobs.map((job) => ({
+        publishId: job.publishId, subId: job.subId, version: job.version,
+        phase: job.phase, at: job.at, note: job.note ?? null,
+      }));
+      return send(res, 200, { ok: true, items, pending });
     } catch (error) {
       return send(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
@@ -785,51 +965,149 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         return `<tr><td>${hooks.escape(skill.name)}<div class="space-muted"><code>${hooks.escape(skill.id)}</code></div></td>` +
           `<td>${skill.steps.length} 步</td><td>${state}</td>` +
           `<td><button data-publish="${hooks.escape(skill.id)}">发布</button>` +
-          (record ? ` <button data-rollback="${hooks.escape(record.subId)}">回退</button>` : "") + `</td></tr>`;
+          (record ? ` <button data-rollback="${hooks.escape(record.subId)}">回退</button>` : "") +
+          (record && record.stage === "written" && record.publishId ? ` <button data-resume="${hooks.escape(record.publishId)}">核对</button>` : "") +
+          `</td></tr>`;
       }).join("");
+      const pendingRows = readPending().jobs.map((job) =>
+        "<li><code>" + hooks.escape(job.subId) + "</code> v" + hooks.escape(job.version) +
+        " · " + hooks.escape(job.phase) +
+        (job.note ? " · " + hooks.escape(job.note) : "") + "</li>").join("");
+      const script = [
+        "const report = document.getElementById(\"report\");",
+        "function say(line) { report.textContent += line + String.fromCharCode(10); }",
+        "async function api(path, body) {",
+        "  const res = await fetch(path, body === undefined ? {} : { method: \"POST\", headers: { \"Content-Type\": \"application/json\" }, body: JSON.stringify(body) });",
+        "  return await res.json().catch(() => ({ ok: false, error: \"返回不是 JSON\" }));",
+        "}",
+        "async function probe(path) {",
+        "  try {",
+        "    const res = await fetch(path, { headers: { Accept: \"application/json\" }, cache: \"no-store\" });",
+        "    if (!res.ok) return { kind: \"rejected\", status: res.status };",
+        "    const body = await res.json().catch(() => null);",
+        "    if (!body) return { kind: \"rejected\", status: res.status, detail: \"返回不是 JSON\" };",
+        "    return { kind: \"ok\", body: body };",
+        "  } catch (error) {",
+        "    return { kind: \"unreachable\", detail: String((error && error.message) || error) };",
+        "  }",
+        "}",
+        "async function reloadParent(id) {",
+        "  try {",
+        "    const res = await fetch(\"/api/plugin\", { method: \"POST\", headers: { \"Content-Type\": \"application/json\" }, body: JSON.stringify({ id: id, action: \"reload\" }) });",
+        "    if (!res.ok) return { kind: \"rejected\", status: res.status };",
+        "    const body = await res.json().catch(() => null);",
+        "    if (body && body.ok === false) return { kind: \"rejected\", detail: JSON.stringify(body).slice(0, 200) };",
+        "    return { kind: \"ok\" };",
+        "  } catch (error) {",
+        "    return { kind: \"unreachable\", detail: String((error && error.message) || error) };",
+        "  }",
+        "}",
+        "function pluginEntry(status, id) {",
+        "  const list = status && status.plugins;",
+        "  if (!Array.isArray(list)) return null;",
+        "  for (const item of list) if (item && item.id === id) return item;",
+        "  return null;",
+        "}",
+        "function pendingHas(status, publishId) {",
+        "  const list = status && status.pending;",
+        "  if (!Array.isArray(list)) return true;",
+        "  if (!publishId) return false;",
+        "  return list.some((item) => item.publishId === publishId);",
+        "}",
+        "async function settle(job, tries, wait) {",
+        "  let last = \"还没核对\";",
+        "  let anyStatus = false;",
+        "  for (let i = 0; i < tries; i += 1) {",
+        "    const st = await probe(\"/api/status?t=\" + Date.now());",
+        "    if (st.kind === \"ok\") {",
+        "      anyStatus = true;",
+        "      const entry = pluginEntry(st.body, job.reloadId + \"/\" + job.subId);",
+        "      if (entry) {",
+        "        if (entry.enabled === false) return { state: \"disabled\", detail: \"插件是停用状态\" };",
+        "        if (String(entry.version) === String(job.version)) {",
+        "          const v = await api(\"/plugins/thinking-space/shells/verify\", { subId: job.subId });",
+        "          if (v && v.ok) return { state: \"ok\", detail: \"探针返回 v\" + (v.version || job.version) };",
+        "          last = (v && v.error) ? v.error : \"探针没通过\";",
+        "        } else { last = \"宿主里还是 v\" + entry.version; }",
+        "      } else { last = \"工具表里还没有 \" + job.toolName; }",
+        "    } else { last = \"状态接口连不上：\" + (st.detail || st.status); }",
+        "    if (i < tries - 1) await new Promise((done) => setTimeout(done, wait));",
+        "  }",
+        "  return { state: anyStatus ? \"stale\" : \"unknown\", detail: last };",
+        "}",
+        "const resumeJobs = {};",
+        "function showResume(job) {",
+        "  resumeJobs[job.publishId] = job;",
+        "  const bar = document.getElementById(\"resume\");",
+        "  if (!bar) return;",
+        "  bar.textContent = \"有一条发布待确认：\" + job.subId + \" v\" + job.version + \" \";",
+        "  const button = document.createElement(\"button\");",
+        "  button.textContent = \"继续核对\";",
+        "  button.addEventListener(\"click\", () => resume(job.publishId));",
+        "  bar.appendChild(button);",
+        "}",
+        "async function resume(publishId) {",
+        "  const job = resumeJobs[publishId];",
+        "  if (!job) { say(\"这条发布不在本页记录里，刷新页面再核对。\"); return; }",
+        "  const st = await probe(\"/api/status?t=\" + Date.now());",
+        "  if (st.kind === \"ok\" && !pendingHas(st.body, publishId)) { say(\"这条发布已经不是待确认状态（可能已回退或被别的发布顶掉），不再自动处理。\"); return; }",
+        "  say(\"── 继续核对 \" + job.subId);",
+        "  return await finish(job, { kind: \"unknown\" });",
+        "}",
+        "async function finish(job, reload) {",
+        "  const tries = reload.kind === \"ok\" ? 5 : 6;",
+        "  const outcome = await settle(job, tries, 1200);",
+        "  say(\"核对：\" + JSON.stringify(outcome));",
+        "  if (outcome.state === \"ok\") { say(\"发布完成：\" + job.subId + \" v\" + job.version); return { state: \"ok\", subId: job.subId }; }",
+        "  if (outcome.state === \"disabled\") { say(\"已写入，保持停用。启用这个子插件后再核对。\"); return { state: \"disabled\", subId: job.subId }; }",
+        "  if (outcome.state === \"unknown\") { say(\"重载结果待确认：连宿主状态都查不到。没有自动回退。\"); showResume(job); return { state: \"unknown\", subId: job.subId }; }",
+        "  say(\"重载没有换到新版本：\" + outcome.detail);",
+        "  const why = reload.kind === \"rejected\" ? \"宿主拒绝重载\" : \"重载后版本没变\";",
+        "  const back = await api(\"/plugins/thinking-space/shells/rollback\", { subId: job.subId, reason: why + \"：\" + outcome.detail });",
+        "  say(\"回退：\" + JSON.stringify(back));",
+        "  if (!back.ok) { say(\"回退失败，备份位置：\" + (back.keptBackup || \"\") + \"；恢复记录留在 data/publish-pending.json。\"); return { state: \"rollback-failed\", subId: job.subId }; }",
+        "  const again = await reloadParent(job.reloadId);",
+        "  say(\"回退后重载：\" + JSON.stringify(again));",
+        "  return { state: \"rolled-back\", subId: job.subId };",
+        "}",
+        "async function full(skillId) {",
+        "  say(\"── 发布 \" + skillId);",
+        "  const beforeProbe = await probe(\"/api/status?t=\" + Date.now());",
+        "  const pushed = await api(\"/plugins/thinking-space/shells/publish\", { skillId: skillId });",
+        "  say(JSON.stringify(pushed));",
+        "  if (!pushed.ok) return pushed;",
+        "  const job = { subId: pushed.subId, toolName: pushed.toolName, version: pushed.version, reloadId: pushed.reloadId || \"thinking-space\", publishId: pushed.publishId };",
+        "  const beforeEntry = beforeProbe.kind === \"ok\" ? pluginEntry(beforeProbe.body, job.reloadId + \"/\" + job.subId) : null;",
+        "  const enabledBefore = beforeEntry ? beforeEntry.enabled !== false : true;",
+        "  if (pushed.reused && !pushed.needsReload) { say(\"同一个技能、同一份内容，已经验过。没有重载，也不核对。\"); return pushed; }",
+        "  if (!enabledBefore) { say(\"发布前这个子插件是停用的：文件和清单写好了，保持停用。启用之后再核对。\"); return { state: \"disabled\", subId: job.subId }; }",
+        "  const reload = await reloadParent(job.reloadId);",
+        "  say(\"重载：\" + JSON.stringify(reload));",
+        "  return await finish(job, reload);",
+        "}",
+        "document.querySelectorAll(\"[data-publish]\").forEach((button) => button.addEventListener(\"click\", () => full(button.dataset.publish)));",
+        "document.querySelectorAll(\"[data-rollback]\").forEach((button) => button.addEventListener(\"click\", async () => {",
+        "  const back = await api(\"/plugins/thinking-space/shells/rollback\", { subId: button.dataset.rollback, reason: \"手动回退\" });",
+        "  say(\"回退：\" + JSON.stringify(back));",
+        "  if (back.ok) await reloadParent(back.reloadId);",
+        "}));",
+        "document.querySelectorAll(\"[data-resume]\").forEach((button) => button.addEventListener(\"click\", () => resume(button.dataset.resume)));",
+        "window.__shells = { full: full, settle: settle, finish: finish, resume: resume, reloadParent: reloadParent, probe: probe, pendingHas: pendingHas, pluginEntry: pluginEntry };"
+      ].join("\n");
       const body = `<p class="space-muted">发布不是保存。保存技能只写技能库；发布才会生成子插件目录、改父清单，然后要重载一次才生效。` +
         `重载由这一页来调——只有浏览器带着会话凭据，插件自己没这个权限。</p>` +
-        `<p><button id="publish-all-verify">发布并验收（自动重载）</button></p>` +
-        `<table style="width:100%;border-collapse:collapse;font-size:13px;text-align:left">` +
-        `<thead><tr><th>技能</th><th>规模</th><th>已发布</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="4">技能库是空的。</td></tr>`}</tbody></table>` +
-        `<pre id="report" style="margin-top:16px;white-space:pre-wrap;font-size:13px"></pre>` +
-        `<script>
-const report = document.getElementById("report");
-function say(line) { report.textContent += line + "\\n"; }
-async function api(path, body) {
-  const res = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  return await res.json().catch(() => ({ ok: false, error: "返回不是 JSON" }));
-}
-async function reloadParent(id) {
-  const res = await fetch("/api/plugin", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, action: "reload" }) });
-  return res.ok;
-}
-async function full(skillId) {
-  say("── 发布 " + skillId);
-  const pushed = await api("/plugins/thinking-space/shells/publish", { skillId });
-  say(JSON.stringify(pushed));
-  if (!pushed.ok) return pushed;
-  if (pushed.reused) { say("复用上次结果，不重载。"); return pushed; }
-  say("重载 " + pushed.reloadId + " …");
-  await reloadParent(pushed.reloadId);
-  let check = await api("/plugins/thinking-space/shells/verify", { subId: pushed.subId });
-  say("验收：" + JSON.stringify(check));
-  if (!check.ok) {
-    const back = await api("/plugins/thinking-space/shells/rollback", { subId: pushed.subId, reason: "验收没过：" + check.reason });
-    say("回退：" + JSON.stringify(back));
-    await reloadParent(pushed.reloadId);
-    check = await api("/plugins/thinking-space/shells/verify", { subId: pushed.subId });
-    say("回退后再验收：" + JSON.stringify(check));
-  }
-  return check;
-}
-document.querySelectorAll("[data-publish]").forEach((button) => button.addEventListener("click", () => full(button.dataset.publish)));
-document.querySelectorAll("[data-rollback]").forEach((button) => button.addEventListener("click", async () => {
-  const back = await api("/plugins/thinking-space/shells/rollback", { subId: button.dataset.rollback, reason: "手动回退" });
-  say("回退：" + JSON.stringify(back));
-  if (back.ok) await reloadParent(back.reloadId);
-}));
-</script>`;
+        (pendingRows ? `<p class="space-muted">待确认的发布：</p><ul>` + pendingRows + `</ul>` : "") +
+        `<div id="resume" class="space-muted"></div>
+<p><button id="publish-all-verify">发布并验收（自动重载）</button></p>
+<table style="width:100%;border-collapse:collapse;font-size:13px;text-align:left">
+<thead><tr><th>技能</th><th>规模</th><th>已发布</th><th></th></tr></thead><tbody>` +
+        (rows || `<tr><td colspan="4">技能库是空的。</td></tr>`) +
+        `</tbody></table>
+<pre id="report" style="margin-top:16px;white-space:pre-wrap;font-size:13px"></pre>
+<script>
+` + script + `</script>`;
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(hooks.html("技能壳", body));
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(hooks.html("技能壳", body));
     } catch (error) {
