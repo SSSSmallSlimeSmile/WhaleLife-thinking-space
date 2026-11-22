@@ -1,0 +1,6 @@
+id: skill-demo-canvas-twice
+name: 技能壳·画布状态两次读
+description: 把思维空间技能 demo-canvas-twice 包成一个独立工具。壳里只存技能 id 和参数映射，运行的时候调真技能，不复制技能内容。
+version: 0.1.0
+apiVersion: "1.0.0"
+depends: [web]

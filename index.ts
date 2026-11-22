@@ -3,7 +3,9 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import type { Context } from "whalelife";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { existsSync, readdirSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 /** 展示用字段：日常版宿主认识 displayName，上游宿主没有。类型上补一次，
  *  运行时原样传过去，不认识的宿主会忽略它，不影响工具本身。 */
@@ -34,6 +36,8 @@ const flowsFile = "flows.json";
 const localReportFile = "local-report.json";
 const paramDefaultsFile = "param-defaults.json";
 const pagePath = "/plugins/thinking-space/";
+/** 插件目录。子插件的墓碑清扫要按它算路径。 */
+const here = dirname(fileURLToPath(import.meta.url));
 const defaultSpaceUrl = "http://127.0.0.1:9281/";
 const defaultTriggerPhrase = "XXX，你学会了吗？";
 const idPattern = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -879,6 +883,28 @@ function summarize(skill: Skill, catalog: Map<string, ToolContract>, stat?: { ru
 }
 
 export function apply(ctx: Context) {
+  /** 手搓子插件的卸载收尾。子插件删不掉自己：Windows 下正在运行的目录删不动，
+   *  硬删会留下半份残骸。所以卸载分两步——子插件只写 data/uninstall.flag，
+   *  宿主下次启动、在子插件被扫到之前，由父插件在这里清掉。
+   *  同步做：父插件的 children() 在 apply() 返回后立刻开始扫 sub/。 */
+  function sweepUninstalled() {
+    let dirs;
+    try { dirs = readdirSync(join(here, "sub"), { withFileTypes: true }); }
+    catch { return; }
+    for (const child of dirs) {
+      if (!child.isDirectory()) continue;
+      const dir = join(here, "sub", child.name);
+      // 只认 sub/<一层>/data/uninstall.flag，别的位置一律不碰。
+      if (!existsSync(join(dir, "data", "uninstall.flag"))) continue;
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        ctx.logger.info(`思维空间：按墓碑清掉了子插件 ${child.name}`);
+      } catch (error) {
+        ctx.logger.warn(`思维空间：清 ${child.name} 没成功`, error);
+      }
+    }
+  }
+  sweepUninstalled();
   const traces = new Map<string, RunResult>();
   const traceTtl = 60 * 60 * 1000;
   function remember(id: string, value: RunResult) {
