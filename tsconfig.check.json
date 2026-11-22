@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "paths": {
+      "whalelife": ["K:/WhaleLifeUpstream/core/context.ts"]
+    },
+    "typeRoots": ["K:/WhaleLifeUpstream/node_modules/@types"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true
+  },
+  "include": ["index.ts", "sub/**/*.ts"]
+}
