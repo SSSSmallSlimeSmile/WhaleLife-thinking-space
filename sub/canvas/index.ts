@@ -12,6 +12,7 @@
  *    config/config.json 的 web.port 读，读不到才退回脚本默认值。
  */
 import type { Context } from "whalelife";
+import type { ChildProcess } from "node:child_process";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -108,6 +109,10 @@ export async function apply(ctx: Context) {
   let canvasError: string | undefined;
   /** 这个实例亲手拉起来的画布，宿主退出时按它收。 */
   let canvasHostPid: number | null = null;
+  /** 拉起来时留在手上的进程句柄：宿主停插件时会话只给 1 秒，靠它能立刻结束。 */
+  let canvasChild: ChildProcess | null = null;
+  /** 最近一次「命令行里的归属标识对得上」的 PID。句柄没了才用它兜底。 */
+  let verifiedPid: number | null = null;
 
   // 脚本落成临时 .ps1 再 -File 执行：双引号里的 $ 不会被外层命令行先展开。
   function ps(script: string): Promise<{ code: number; out: string; err: string }> {
@@ -147,7 +152,11 @@ export async function apply(ctx: Context) {
   /** 这个 PID 是不是本实例亲手拉起来的。PID 会被系统复用，所以每次都重读命令行。 */
   async function isOurs(pid: number): Promise<boolean> {
     if (!cfg.ownerToken) return false;
-    return claimOf(await cmdlineOf(pid)) === cfg.ownerToken;
+    const ok = claimOf(await cmdlineOf(pid)) === cfg.ownerToken;
+    // 归属只在内部判断，对外只说「不是本实例启动的」，不转述进程参数。
+    if (ok) verifiedPid = pid;
+    else if (verifiedPid === pid) verifiedPid = null;
+    return ok;
   }
 
   /** 读宿主自己的端口：config/config.json 里的 web.port 才是准的。 */
@@ -200,9 +209,7 @@ export async function apply(ctx: Context) {
         canvasError = undefined;
         return `画布已经在跑了（PID ${running}，端口 ${cfg.port}，本实例启动的）。`;
       }
-      const cmd = await cmdlineOf(running);
-      canvasError = `端口 ${cfg.port} 已经被别的进程占着（PID ${running}），不是这个实例启动的画布，没有接管它。\n`
-        + `命令行：${cmd || "（读不到）"}\n`
+      canvasError = `端口 ${cfg.port} 已经被占用（PID ${running}），但不是这个实例启动的画布，没有接管它。`
         + `把端口改成别的，或者先自己把它停掉再启动。`;
       return canvasError;
     }
@@ -212,12 +219,17 @@ export async function apply(ctx: Context) {
     const upstream = locateUpstream(cfg.port);
     if (!upstream) { canvasError = "读不到宿主端口：没找到带 web.port 的 config/config.json。画布不起来，免得连到别的实例上。"; return canvasError; }
     try {
-      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream", String(upstream.port), "--owner", cfg.ownerToken],
+      // --parent-pid 给脚本自己兜底：宿主被硬杀时插件来不及收尾，画布发现自己成了孤儿就退出。
+      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream", String(upstream.port), "--owner", cfg.ownerToken, "--parent-pid", String(process.ppid)],
         { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
       child.unref();
+      canvasChild = child;
       canvasHostPid = child.pid ?? null;
       const owner = canvasHostPid;
-      child.once("exit", () => { if (canvasHostPid === owner) canvasHostPid = null; });
+      child.once("exit", () => {
+        if (canvasChild === child) canvasChild = null;
+        if (canvasHostPid === owner) { canvasHostPid = null; verifiedPid = null; }
+      });
     } catch (error) {
       canvasError = `拉不起来：${error instanceof Error ? error.message : ""}`;
       return canvasError;
@@ -235,9 +247,7 @@ export async function apply(ctx: Context) {
     const pid = await canvasPid();
     if (!pid) { canvasHostPid = null; canvasError = undefined; return "本来就没在跑。"; }
     if (!(await isOurs(pid))) {
-      const cmd = await cmdlineOf(pid);
-      canvasError = `端口 ${cfg.port} 上的进程（PID ${pid}）不是这个实例启动的画布，没有动它。\n`
-        + `命令行：${cmd || "（读不到）"}\n`
+      canvasError = `端口 ${cfg.port} 上的进程（PID ${pid}）不是这个实例启动的画布，没有动它。`
         + `是另一个实例的画布就去那个实例里停；是你自己开的就手动结束。`;
       return canvasError;
     }
@@ -249,26 +259,29 @@ export async function apply(ctx: Context) {
   }
 
   // 跟着思维空间走：父插件停 → 宿主先停子插件 → 这里把画布进程一起收掉。
-  // 用同步 taskkill：插件 stop 只等一眼，异步 PowerShell 来不及。
-  /** 同步取命令行：插件 stop 只等一眼，异步 PowerShell 来不及。 */
-  function cmdlineSync(pid: number): string {
-    try {
-      const out = spawnSync("powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue).CommandLine`],
-        { windowsHide: true, timeout: 8000, encoding: "utf8" });
-      return String(out.stdout ?? "");
-    } catch { return ""; }
+  //
+  // 这一段的预算只有 1 秒：宿主 plugin-process.ts 的 stopTimeoutMs 默认 1000，
+  // 超时直接 SIGKILL 子插件，清理函数里剩下的话一句都跑不到。以前在这里用
+  // PowerShell 查一次命令行要 0.4–0.6 秒，机器一忙就超时 —— 画布就成了孤儿，
+  // 端口一直占着。所以收尾只做快事，一次进程查询都不做。
+  function kill(pid: number) {
+    try { spawnSync("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true, stdio: "ignore", timeout: 400 }); }
+    catch { /* 已经退了就算了 */ }
   }
 
   ctx.effect(() => () => {
     if (!cfg.stopWithSpace) return;
+    const child = canvasChild;
     const pid = canvasHostPid;
+    const verified = verifiedPid;
+    canvasChild = null;
     canvasHostPid = null;
-    if (!pid) return;
-    // 退出时也要确认归属：画布可能先退了、PID 被系统复用，攒着旧 PID 就杀会误伤。
-    if (!cfg.ownerToken || claimOf(cmdlineSync(pid)) !== cfg.ownerToken) return;
-    try { spawnSync("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true, stdio: "ignore" }); }
-    catch { /* 已经退了就算了 */ }
+    verifiedPid = null;
+    // 句柄还在：这就是本进程 spawn 出来的那个进程。Windows 在句柄没关之前不会
+    // 复用这个 PID，所以不必再读命令行核对归属，直接结束最快也最准。
+    if (child && child.exitCode === null && child.pid) { kill(child.pid); return; }
+    // 句柄没了（插件重载过，画布还在跑）：只杀本进程确实核对过归属的那个 PID。
+    if (pid && pid === verified) kill(pid);
   });
 
   ctx.tools.register({
@@ -287,7 +300,7 @@ export async function apply(ctx: Context) {
 
   ctx.tools.register({
     name: "canvas_stop", displayName: "停止画布", danger: "ask",
-    description: "停掉本实例拉起来的画布进程。命令行里没有本实例归属标识时拒绝，不误杀别的实例或本地别的服务。",
+    description: "停掉本实例拉起来的画布进程。归属对不上就拒绝，不误杀别的实例或本地别的服务。",
     schema: { type: "object", properties: {}, additionalProperties: false },
     async run() { const note = await stop(); return { status: canvasError ? "failed" : "ok", note, ...(await state()) }; },
   });

@@ -6,6 +6,7 @@ function argOf(name) {
   const i = process.argv.indexOf(name);
   return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : '';
 }
+const parentPid = Number(argOf('--parent-pid') || 0);
 const port = Number(argOf('--port') || process.env.WORKBENCH_PORT || 9281);
 const upstream = Number(argOf('--upstream') || process.env.WORKBENCH_WHALE_PORT || 9270);
 if (![port, upstream].every(value => Number.isInteger(value) && value > 0 && value <= 65535) || port === upstream) {
@@ -158,3 +159,12 @@ if (process.env.WORKBENCH_WATCH_PARENT !== '0') {
   setInterval(probe, intervalMs);
 }
 server.listen(port, host, () => console.log('许愿一个功能 · '+origin));
+// 父进程没了就别留着占端口：宿主被硬杀时插件进程来不及收尾，这条是最后的兜底。
+// 只认启动时给的 --parent-pid；手动跑脚本不带这个参数就没有看护。
+if (Number.isInteger(parentPid) && parentPid > 0) {
+  const watch = setInterval(() => {
+    try { process.kill(parentPid, 0); }
+    catch { clearInterval(watch); console.log('父进程已退出，画布跟着收掉。'); process.exit(0); }
+  }, 2000);
+  watch.unref?.();
+}
