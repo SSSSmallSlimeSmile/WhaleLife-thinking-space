@@ -1,7 +1,7 @@
 id: thinking-space
 name: 思维空间
 description: 服务端技能库，把工具链存成可复用的技能
-version: 0.2.6
+version: 0.3.0
 apiVersion: 1.0.0
 depends: [web, tools, models]
 sub: [canvas, skill-demo-canvas-twice]

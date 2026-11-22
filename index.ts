@@ -6,6 +6,7 @@ import type { Context } from "whalelife";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { registerSkillPublish } from "./publish.ts";
 
 /** 展示用字段：日常版宿主认识 displayName，上游宿主没有。类型上补一次，
  *  运行时原样传过去，不认识的宿主会忽略它，不影响工具本身。 */
@@ -2619,5 +2620,16 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       res.writeHead(303, { Location: pagePath + "local?tidy_err=" + encodeURIComponent(error instanceof Error ? error.message : "整理失败。") });
       res.end();
     }
+  });
+
+  // 技能 → 子插件的发布与回退。发布只写文件，重载由页面（带会话凭据）来调。
+  registerSkillPublish(ctx, {
+    here,
+    parentId: "thinking-space",
+    readSkills: async () => (await readStore()).skills as any,
+    toolNames: async () => (await toolsSafe()).map((tool: any) => ({ name: String(tool?.name ?? ""), plugin: String(tool?.plugin ?? "") })),
+    readBody,
+    escape,
+    html,
   });
 }
