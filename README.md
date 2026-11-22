@@ -43,7 +43,7 @@ node install.mjs --host "K:\WhaleLife\whalelife"
 它做四件事：
 
 ```
-下载 thinking-space-0.1.3.wlpkg.gz
+下载 thinking-space-0.2.4.wlpkg.gz
 逐文件比对 sha256（不一致就停，不写半个文件）
 释放到 <宿主>/plugins/thinking-space
 写 data/install.json 记录版本、来源、包摘要
@@ -282,6 +282,12 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 **三个工具**：`canvas_status`（只读）、`canvas_start`、`canvas_stop`（后两个要确认）。
 
+### 技能组与发布
+
+画布顶栏第四个标签「技能组」读宿主技能库（`GET /plugins/thinking-space/skills`），按功能组 / 复合功能组两块列出，只读，用来对照画布上的流程和库里实际存的技能。
+
+画布上的流程点「发布到思维空间」会转成技能存进 `skills.json`（`POST /plugins/thinking-space/publish`）。技能只能引用上游某一步的**某个字段**，所以跨步骤连线要填字段路径（如 `data.text`），留空或写错宿主返回 422，原因原样显示、不保存。
+
 ### 依赖
 
 - 需要 WhaleLife 宿主在跑（画布靠它取插件列表、市场目录、工具目录）
@@ -312,6 +318,8 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 ## 十一、文档
 
+- [`docs/使用-思维空间.md`](docs/使用-思维空间.md) —— 父插件怎么用：跑技能、写技能、发布、常见失败
+- [`docs/使用-思维画布.md`](docs/使用-思维画布.md) —— 子插件怎么用：启动、画流程、发布、四个标签
 - [`docs/技术说明.md`](docs/技术说明.md) —— 存储结构、执行器、五态、自动整理与精简的实现细节
 - [`docs/实测数据.md`](docs/实测数据.md) —— 原生调用 vs 技能组、自动整理、自动精简、候选砍枝的原始数字
 - [`docs/插件接入规范.md`](docs/插件接入规范.md) —— 建议上游加一个可选的输出端口声明，让插件市场的插件能无缝转进来
