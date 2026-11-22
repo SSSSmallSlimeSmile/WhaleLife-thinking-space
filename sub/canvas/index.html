@@ -2162,7 +2162,16 @@ function updateProjectStatus(){
   const status=clean?'已保存 '+new Date(savedProjectSnapshot.savedAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'未保存';
   button.textContent='思维保存 · '+status;
 }
-let serverSeenAt=null,remoteConflict=null,serverSyncTimer=null;
+let serverSeenAt=null,remoteConflict=null,serverSyncTimer=null,lastPushedAt='';
+function sameProject(other){
+  if(!other)return false;
+  try{return JSON.stringify([other.tools,other.flows,other.workflowRevisions,other.catalogMode])===JSON.stringify([tools,flows,workflowRevisions,catalogMode]);}catch{return false;}
+}
+window.noteServerWrite=function(at){
+  if(typeof at!=='string'||!at)return;
+  lastPushedAt=at;serverSeenAt=at;
+  if(remoteConflict&&remoteConflict.at&&remoteConflict.at<=at){clearRemoteBanner();remoteConflict=null;}
+};
 function canvasIsClean(){
   const saved=savedProjectSnapshot?.project;
   return !!saved&&JSON.stringify([saved.tools,saved.flows,saved.workflowRevisions,saved.catalogMode])===JSON.stringify([tools,flows,workflowRevisions,catalogMode]);
@@ -2218,6 +2227,9 @@ async function pollServerSnapshot(){
   serverSeenAt=at;
   const mine=localSnapshotAt();
   if(mine&&at<=mine)return; /* 这就是我们自己刚存上去的那份 */
+  if(lastPushedAt&&at<=lastPushedAt)return; /* 自动保存推上去的那一版，不是别人的改动 */
+  if(remoteConflict&&remoteConflict.at===at)return; /* 同一条已经提示过，不再刷 */
+  if(sameProject(data.snapshot&&data.snapshot.project)){clearRemoteBanner();remoteConflict=null;return;} /* 时间戳变了但内容一样 */
   if(canvasIsClean()){
     if(!adoptServerSnapshot(data.snapshot))console.info('服务端有新快照，但读不出 project，保持当前画布。');
     return;
@@ -2225,7 +2237,7 @@ async function pollServerSnapshot(){
   remoteConflict={at,snapshot:data.snapshot};
   showRemoteBanner(data.snapshot,at);
 }
-setInterval(()=>{void pollServerSnapshot();},10000);
+setInterval(()=>{void pollServerSnapshot();},30000);
 function scheduleServerSync(){
   if(serverSyncTimer)clearTimeout(serverSyncTimer);
   serverSyncTimer=setTimeout(()=>{
@@ -4710,7 +4722,7 @@ async function load() {
     try{
       fetch(URL,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({snapshot:snapshot})})
         .then(function(r){return r.ok?r.json():null;})
-        .then(function(d){ if(d&&d.ok) console.info('工程已同步到服务端',d.savedAt); })
+        .then(function(d){ if(d&&d.ok){ if(window.noteServerWrite) window.noteServerWrite(d.savedAt); console.info('工程已同步到服务端',d.savedAt); } })
         .catch(function(){});
     }catch(e){}
   };
