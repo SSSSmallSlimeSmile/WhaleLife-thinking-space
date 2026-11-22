@@ -19,6 +19,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
+/** 展示用字段：日常版宿主认识 displayName，上游宿主没有。类型上补一次，
+ *  运行时原样传过去，不认识的宿主会忽略它，不影响工具本身。 */
+declare module "whalelife" {
+  interface ToolDefinition<Arguments = Record<string, unknown>, Result = unknown> {
+    displayName?: string;
+  }
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const pagePath = "/plugins/thinking-space/canvas/";
 const actionPath = "/plugins/thinking-space/canvas/action";

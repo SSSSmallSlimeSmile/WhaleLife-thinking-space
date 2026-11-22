@@ -2,8 +2,31 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
-import type { Context, ToolContract } from "whalelife";
+import type { Context } from "whalelife";
 import { join, resolve } from "node:path";
+
+/** 展示用字段：日常版宿主认识 displayName，上游宿主没有。类型上补一次，
+ *  运行时原样传过去，不认识的宿主会忽略它，不影响工具本身。 */
+declare module "whalelife" {
+  interface ToolDefinition<Arguments = Record<string, unknown>, Result = unknown> {
+    displayName?: string;
+  }
+}
+
+/** 工具目录条目的形状由宿主给出。上游宿主没有 catalog()，这里只声明本插件真正读的字段，
+ *  缺的那几项按空处理，不假造。 */
+type ToolContract = {
+  name: string;
+  description?: string;
+  plugin?: string;
+  danger?: string;
+  displayName?: string;
+  category?: string;
+  inputSchema?: Record<string, unknown> | null;
+  outputSchema?: Record<string, unknown> | null;
+  visibleInputs?: string[];
+  visibleOutputs?: string[];
+};
 
 const storeFile = "skills.json";
 const settingsFile = "settings.json";
@@ -112,7 +135,8 @@ function dangerFor(steps: Step[], catalog: Map<string, ToolContract>, fallback: 
   let highest = 0;
   for (const step of steps) {
     const tool = catalog.get(step.tool);
-    highest = Math.max(highest, dangers.indexOf(tool?.plugin === step.plugin ? tool.danger : fallback));
+    const hazard = tool?.plugin === step.plugin ? tool.danger : fallback;
+    highest = Math.max(highest, dangers.indexOf(hazard as Danger));
   }
   return dangers[highest];
 }
@@ -174,7 +198,7 @@ function validateSkill(id: unknown, spec: unknown, catalog: Map<string, ToolCont
       }
     }
     previous.add(item.id);
-    return { id: item.id, tool: tool.name, plugin: tool.plugin, params: item.params, next };
+    return { id: item.id, tool: tool.name, plugin: tool.plugin ?? "", params: item.params, next };
   });
   return { schemaVersion: 1, id, name, description, kind, params, steps, danger: dangerFor(steps, catalog, "full"),
     ...(useWhen ? { useWhen } : {}), ...(notFor ? { notFor } : {}), ...(outputs ? { outputs } : {}) };
