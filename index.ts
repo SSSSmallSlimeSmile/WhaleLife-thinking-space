@@ -2153,7 +2153,8 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       const deletedPanel = deleted
         ? `<section class="space-panel"><h2>删掉了</h2><p>「${escape(deleted)}」已经从技能库里移除，统计和待确认建议一并清掉。</p></section>`
         : "";
-      const body = `<div class="space-toolbar"><a class="btn space-secondary" href="${pagePath}">← 返回设置</a>${organizeButton}</div>` + receipt + organizePanel + deletedPanel + trendPanel + renderUsage(withStats, stats, await readCalls()) + renderSkills(withStats, hints);
+      const shellButton = `<a class="btn space-secondary" href="/plugins/thinking-space/shells">生成壳 →</a>`;
+      const body = `<div class="space-toolbar"><a class="btn space-secondary" href="${pagePath}">← 返回设置</a>${organizeButton}${shellButton}</div>` + receipt + organizePanel + deletedPanel + trendPanel + renderUsage(withStats, stats, await readCalls()) + renderSkills(withStats, hints);
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html("思维空间", body));
     } catch {

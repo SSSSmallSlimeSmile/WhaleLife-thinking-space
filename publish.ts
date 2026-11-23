@@ -28,6 +28,8 @@ export type PublishSkill = {
   description?: string;
   kind: string;
   danger: string;
+  /** 发布那一刻技能是第几版。壳里写死这个数，运行时用来对「技能改没改过」。 */
+  revision?: number;
   steps: { id: string; tool: string; plugin: string }[];
 };
 
@@ -54,6 +56,8 @@ type PublishRecord = {
   version: string;
   danger: string;
   fingerprint: string;
+  /** 发布时技能的 revision，页面上拿来比对技能改没改过。 */
+  skillRevision?: number;
   stage: Stage;
   at: string;
   /** 上一版整目录的备份，相对 data/publish-backups/；首次发布为 null。 */
@@ -93,7 +97,7 @@ type PendingFile = { schemaVersion: 1; jobs: PendingJob[] };
 
 const SUB_PREFIX = "skill-";
 /** 模板版本。模板改了就把这个加一，否则同一个技能会因为「指纹没变」被判定成复用。 */
-const TEMPLATE_VERSION = 2;
+const TEMPLATE_VERSION = 3;
 const MAX_SUB_ID = 40;
 
 /** 技能 id → 子插件目录名。只留小写字母、数字、连字符，稳定不随版本变。 */
@@ -161,6 +165,8 @@ const SKILL_ID = __SKILL_ID__;
 const TOOL_NAME = __TOOL_NAME__;
 /** 壳自身的版本，重新发布时跟着变，用来辨认跑的是哪一版。 */
 const SHELL_VERSION = __VERSION__;
+/** 发布时技能是第几版。运行时拿它和技能现在的 rev 对一下，对不上也照跑，但会说明。 */
+const SKILL_REVISION = __SKILL_REVISION__;
 /** 写死：危险等级。壳不能自己给自己降级。 */
 const DANGER = "ask" as const;
 
@@ -221,8 +227,33 @@ export async function apply(ctx: Context) {
     } catch { /* 记不上就算了 */ }
   }
 
+  /**
+   * 技能还在不在、是不是发布时那一版。只读，不执行技能。
+   * 读不到就当没发现问题，交给 space_run 自己报错——这里不该替它下结论。
+   */
+  async function lookUpSkill(session: any): Promise<{ state: "ok" | "missing" | "changed"; revision: number | null }> {
+    try {
+      const raw: any = await (ctx.tools as any).call("space_skills", {}, { permission: "full", signal: session?.signal });
+      const body = raw && raw.ok === true ? raw.result : null;
+      const list = Array.isArray(body?.skills) ? body.skills : null;
+      if (!list) return { state: "ok", revision: null };
+      const found = list.find((item: any) => String(item?.id) === SKILL_ID);
+      if (!found) return { state: "missing", revision: null };
+      const now = Number(found.revision ?? 0);
+      return { state: now === SKILL_REVISION ? "ok" : "changed", revision: now };
+    } catch {
+      return { state: "ok", revision: null };
+    }
+  }
+
   async function runSkill(session: any) {
     const started = Date.now();
+    const look = await lookUpSkill(session);
+    if (look.state === "missing") {
+      const gone = "技能 " + SKILL_ID + " 已经不在了（被删或被改名）。这个壳没用了，建议卸载。";
+      record(false, 0, "failed", gone);
+      return { status: "failed", skill: SKILL_ID, note: gone };
+    }
     let timer: any;
     const timeout = new Promise<never>((_, fail) => {
       timer = setTimeout(() => fail(new Error(\`超过 \${cfg.timeoutMs} 毫秒还没回执，先停在这里；技能本身可能还在跑。\`)), cfg.timeoutMs);
@@ -246,9 +277,13 @@ export async function apply(ctx: Context) {
         return { status: "failed", skill: SKILL_ID, note: reason };
       }
       const result: any = raw.result && typeof raw.result === "object" && "status" in raw.result ? raw.result : { status: "ok", raw: raw.result };
-      const note = result.status === "ok" ? "跑完了。" : String(result.error ?? "没跑成。");
+      const drift = look.state === "changed"
+        ? "技能改过：发布时 rev " + SKILL_REVISION + "，现在 rev " + look.revision + "，这次按新定义跑的。"
+        : "";
+      const tail = result.status === "ok" ? "跑完了。" : String(result.error ?? "没跑成。");
+      const note = [tail, drift].filter(Boolean).join(" ");
       record(result.status === "ok", took, String(result.status ?? "ok"), note);
-      return { status: String(result.status ?? "ok"), skill: SKILL_ID, runId: result.runId ?? null, steps: Array.isArray(result.steps) ? result.steps.length : 0, note, took };
+      return { status: String(result.status ?? "ok"), skill: SKILL_ID, runId: result.runId ?? null, steps: Array.isArray(result.steps) ? result.steps.length : 0, revision: look.revision, note, took };
     } catch (error) {
       const took = Date.now() - started;
       const message = error instanceof Error ? error.message : String(error);
@@ -277,7 +312,7 @@ export async function apply(ctx: Context) {
       description: "只读探针：不执行技能，只回报这个壳的技能 id、壳版本和工具名。用来确认发布有没有生效。",
       schema: { type: "object", properties: {}, additionalProperties: false },
       async run() {
-        return { status: "ok", skill: SKILL_ID, tool: TOOL_NAME, version: SHELL_VERSION, enabled: cfg.enabled, at: new Date().toISOString() };
+        return { status: "ok", skill: SKILL_ID, tool: TOOL_NAME, version: SHELL_VERSION, skillRevision: SKILL_REVISION, enabled: cfg.enabled, at: new Date().toISOString() };
       },
     });
 
@@ -382,6 +417,7 @@ export function renderShell(skill: PublishSkill, subId: string, version: string)
     .replace(/__SKILL_ID__/g, JSON.stringify(skill.id))
     .replace(/__TOOL_NAME__/g, JSON.stringify(toolName))
     .replace(/__VERSION__/g, JSON.stringify(version))
+    .replace(/__SKILL_REVISION__/g, String(Number(skill.revision ?? 0)))
     .replace(/__DISPLAY_NAME__/g, JSON.stringify(skill.name.slice(0, 40)))
     .replace(/__DESCRIPTION__/g, JSON.stringify(description));
   const manifest = [
@@ -426,6 +462,8 @@ function fingerprintOf(skill: PublishSkill, subId: string) {
     .update(skill.name)
     .update("\u0000")
     .update(skill.steps.map((step) => step.tool).join(">"))
+    .update("\u0000")
+    .update(String(Number(skill.revision ?? 0)))
     .digest("hex")
     .slice(0, 16);
 }
@@ -822,6 +860,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
     record.displayName = skill.name;
     record.version = version;
     record.fingerprint = fingerprint;
+    record.skillRevision = Number(skill.revision ?? 0);
     record.stage = "written";
     record.at = new Date().toISOString();
     record.backup = hadDir ? stampId : null;
@@ -957,18 +996,30 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
       const skills = await hooks.readSkills();
       const registry = readRegistry();
       const published = new Map(registry.items.map((item) => [item.skillId, item]));
-      const rows = skills.map((skill) => {
+      const rowOf = (skill: any) => {
         const record = published.get(skill.id);
+        const nowRevision = Number(skill.revision ?? 0);
         const state = record
-          ? `<span class="badge">${hooks.escape(record.stage)}</span><code>${hooks.escape(record.subId)}</code>`
-          : `<span class="badge">未发布</span>`;
+          ? `<span class="badge">${hooks.escape(record.stage)}</span><code>${hooks.escape(record.subId)}</code>` +
+            `<div class="space-muted">发布时 rev ${hooks.escape(String(record.skillRevision ?? "?"))} · 现在 rev ${hooks.escape(String(nowRevision))}` +
+            (Number(record.skillRevision ?? -1) === nowRevision ? "" : " · <strong>技能改过，壳跑的是新定义</strong>") + `</div>`
+          : `<span class="badge">未发布</span><div class="space-muted">现在 rev ${hooks.escape(String(nowRevision))}</div>`;
         return `<tr><td>${hooks.escape(skill.name)}<div class="space-muted"><code>${hooks.escape(skill.id)}</code></div></td>` +
           `<td>${skill.steps.length} 步</td><td>${state}</td>` +
           `<td><button data-publish="${hooks.escape(skill.id)}">发布</button>` +
           (record ? ` <button data-rollback="${hooks.escape(record.subId)}">回退</button>` : "") +
           (record && record.stage === "written" && record.publishId ? ` <button data-resume="${hooks.escape(record.publishId)}">核对</button>` : "") +
           `</td></tr>`;
-      }).join("");
+      };
+      const sectionOf = (kind: string, title: string) => {
+        const group = skills.filter((skill) => skill.kind === kind);
+        return `<h3 style="margin:18px 0 8px;font-size:14px">${title}（${group.length}）</h3>` +
+          `<table style="width:100%;border-collapse:collapse;font-size:13px;text-align:left">` +
+          `<thead><tr><th>技能</th><th>规模</th><th>已发布</th><th></th></tr></thead><tbody>` +
+          (group.map(rowOf).join("") || `<tr><td colspan="4">还没有。</td></tr>`) +
+          `</tbody></table>`;
+      };
+      const sections = sectionOf("single", "功能库") + sectionOf("composite", "复合功能库");
       const pendingRows = readPending().jobs.map((job) =>
         "<li><code>" + hooks.escape(job.subId) + "</code> v" + hooks.escape(job.version) +
         " · " + hooks.escape(job.phase) +
@@ -1096,18 +1147,15 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
       ].join("\n");
       const body = `<p class="space-muted">发布不是保存。保存技能只写技能库；发布才会生成子插件目录、改父清单，然后要重载一次才生效。` +
         `重载由这一页来调——只有浏览器带着会话凭据，插件自己没这个权限。</p>` +
+        `<p class="space-muted">壳只从这一页发布：技能先存在下面的功能库或复合功能库里，再来生成壳。画布上的「发布到思维空间」发的是技能，不是壳。</p>` +
         (pendingRows ? `<p class="space-muted">待确认的发布：</p><ul>` + pendingRows + `</ul>` : "") +
         `<div id="resume" class="space-muted"></div>
 <p><button id="publish-all-verify">发布并验收（自动重载）</button></p>
-<table style="width:100%;border-collapse:collapse;font-size:13px;text-align:left">
-<thead><tr><th>技能</th><th>规模</th><th>已发布</th><th></th></tr></thead><tbody>` +
-        (rows || `<tr><td colspan="4">技能库是空的。</td></tr>`) +
-        `</tbody></table>
+` +
+        sections + `
 <pre id="report" style="margin-top:16px;white-space:pre-wrap;font-size:13px"></pre>
 <script>
 ` + script + `</script>`;
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(hooks.html("技能壳", body));
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(hooks.html("技能壳", body));
     } catch (error) {
