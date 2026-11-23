@@ -442,6 +442,11 @@ function html(title: string, body: string) {
 .space-edit-ops .btn{padding:6px 14px;font-size:13px}
 .space-edit-add{border:1px dashed rgba(127,127,127,.35);border-radius:10px;padding:12px 14px;margin:0 0 6px}
 .space-edit-add legend{padding:0 6px;font-size:13px;font-weight:650}
+.space-edit-add label{margin:0 0 12px}
+.space-edit-add label:last-of-type{margin-bottom:0}
+.space-edit-add input[type=text]{max-width:none}
+.space-edit-add textarea{width:100%;box-sizing:border-box;padding:9px 12px;border-radius:8px;border:1px solid rgba(127,127,127,.35);background:transparent;color:inherit;font:13px/1.5 ui-monospace,Consolas,monospace;resize:vertical}
+.space-edit-add textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(97,88,217,.12)}
 .space-panel label{display:block;margin:0 0 14px;font-weight:600;font-size:14px}
 .space-panel label textarea{margin-top:6px}
 .space-muted{color:var(--muted);font-size:13px;line-height:1.6}
@@ -487,7 +492,7 @@ function html(title: string, body: string) {
 .space-empty{margin:0;color:var(--muted);font-size:14px}
 .space-hints p{margin:0 0 8px;color:#a8661b;line-height:1.6}
 .space-hints p:last-child{margin-bottom:0}
-.space-run{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end;margin:12px 0 0;border-top:1px dashed rgba(127,127,127,.3);padding-top:12px}
+.space-panel .space-run{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end;margin:12px 0 0;border-top:1px dashed rgba(127,127,127,.3);padding-top:12px}
     .space-run label{min-width:0}
     .space-run .space-save{margin-left:auto}
 .space-run label{display:flex;flex-direction:column;gap:5px;font-size:13px;font-weight:600}
@@ -632,11 +637,11 @@ function renderSkills(
           : `<span class="space-badge">还没跑过</span>`
       }${skill.sources && (skill.sources.user || skill.sources.self || skill.sources.page || skill.sources.chat) ? `<span class="space-badge">${[skill.sources.user ? "用户 " + skill.sources.user : "", skill.sources.self ? "自主 " + skill.sources.self : "", skill.sources.page ? "页面 " + skill.sources.page : "", skill.sources.chat ? "旧记录 " + skill.sources.chat : ""].filter(Boolean).join(" · ")}</span>` : ""}${skill.revision ? `<span class="space-badge">rev ${skill.revision}</span>` : ""}<span class="space-muted">${escape(skill.id)}</span></p>
       ${statsLine}
-      <p class="space-card-ops"><a class="btn space-secondary" href="/plugins/thinking-space/edit?id=${escape(skill.id)}">编辑步骤</a>
-      <form method="post" action="/plugins/thinking-space/delete" style="display:inline;margin-left:8px" onsubmit="return confirm('删掉「${escape(skill.name)}」？这条技能的统计和待确认建议也会一起清掉，删了找不回来。')">
+      <div class="space-card-ops"><a class="btn space-secondary" href="/plugins/thinking-space/edit?id=${escape(skill.id)}">编辑步骤</a>
+      <form method="post" action="/plugins/thinking-space/delete" onsubmit="return confirm('删掉「${escape(skill.name)}」？这条技能的统计和待确认建议也会一起清掉，删了找不回来。')">
       <input type="hidden" name="id" value="${escape(skill.id)}">
       <button class="btn space-secondary" type="submit" style="color:#b3261e;border-color:#b3261e55">删除技能</button>
-      </form></p>
+      </form></div>
       <details><summary>看步骤与参数</summary>
       <p class="space-muted">输入参数：${escape(skill.params.map(param => (param.label ?? param.name) + " · " + param.type + (param.required ? " · 必填" : "") + (param.aliases?.length ? " · 别名 " + param.aliases.join("/") : "")).join("，") || "无")}</p>
       <ol class="space-steps">${skill.steps.map(step => `<li><code>${escape(step.id)}</code> · ${escape(step.plugin)} / ${escape(step.tool)}${step.available ? "" : " · <strong>工具不可用</strong>"}<pre>${escape(JSON.stringify(step.params, null, 2))}</pre></li>`).join("")}</ol>
