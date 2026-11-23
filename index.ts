@@ -450,6 +450,14 @@ function html(title: string, body: string) {
 .space-panel label{display:block;margin:0 0 14px;font-weight:600;font-size:14px}
 .space-panel label textarea{margin-top:6px}
 .space-muted{color:var(--muted);font-size:13px;line-height:1.6}
+.space-panel table{width:100%;border-collapse:collapse;font-size:13px;text-align:left}
+.space-panel table th{font-weight:600;font-size:12px;letter-spacing:.04em;opacity:.7;padding:8px 10px;border-bottom:1px solid var(--line)}
+.space-panel table td{padding:10px;border-bottom:1px solid rgba(127,127,127,.15);vertical-align:top}
+.space-panel table tr:last-child td{border-bottom:none}
+.space-panel table .badge{margin-right:6px}
+#report{margin:16px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(127,127,127,.06);font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-break:break-all;max-height:420px;overflow:auto}
+#report:empty{display:none}
+button[data-delete]{border-color:rgba(200,80,80,.5);color:#c05555}
 .space-open{display:inline-flex;align-items:center;gap:8px;padding:12px 24px;border-radius:10px;background:var(--accent);color:#fff!important;text-decoration:none;font-weight:700;font-size:17px;letter-spacing:.02em;box-shadow:0 4px 14px rgba(97,88,217,.28)}
 .space-open:hover{background:#3d2f9c}
 .space-row{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap}
