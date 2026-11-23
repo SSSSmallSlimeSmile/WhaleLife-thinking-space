@@ -4,16 +4,19 @@
  *
  * ComfyUI 联动：给思维画布用的生图入口。
  *
- * 三件事想清楚才这么写：
+ * 四件事想清楚才这么写：
  * 1. 平级子插件：跟 canvas 一样挂在 thinking-space/sub/ 下，启停跟着思维空间，
  *    端口进程那一套一点不沾，只读文件、只回话。
  * 2. 不重复造生图。工作流从《生图》插件的 workflows 目录里读，出图仍然调它的
  *    comfy_generate。这边只解决「画布不知道有哪些工作流」这一个缺口。
  * 3. 生图插件不在，这个插件也不能麻利地消失——不然画布页少一块，用户不知道
  *    为什么。所以它自己照常起来，把「要先装什么」写在页面和工具回执里。
+ * 4. 两个目录都读：workflows/ 是 ComfyUI 的 API 格式，给 comfy_generate 用；
+ *    canvas-flows/ 是画布的功能包，给「注册功能」用。它们由 ComfyUI 那个导出
+ *    扩展一次写两份，同名不同目录——这里只负责列出来，不生成、不改写。
  */
 import type { Context } from "whalelife";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -29,10 +32,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 // 不写盘符：包发到谁的机器上都能用。
 const comfyDir = join(here, "..", "..", "..", "comfy");
 const workflowsDir = join(comfyDir, "workflows");
+const canvasFlowsDir = join(comfyDir, "canvas-flows");
 const pagePath = "/plugins/thinking-space/comfy-bridge/";
 const dataPath = "/plugins/thinking-space/comfy-bridge/workflows";
+const flowsPath = "/plugins/thinking-space/comfy-bridge/flows";
 
 type Workflow = { name: string; size: number; mtime: string };
+type CanvasFlow = { name: string; slug: string; mtime: string; bundle: unknown };
 
 function escape(value: unknown) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -75,23 +81,50 @@ export async function apply(ctx: Context) {
     return out;
   }
 
+  /**
+   * 读画布功能包。坏掉的跳过，不在半路上抛——一个手改坏的 JSON
+   * 不该让整页打不开。名字取包里的 flows[0].name，取不到就用文件名。
+   */
+  function readCanvasFlows(): CanvasFlow[] {
+    if (!existsSync(canvasFlowsDir)) return [];
+    const out: CanvasFlow[] = [];
+    for (const entry of readdirSync(canvasFlowsDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".json")) continue;
+      const full = join(canvasFlowsDir, entry.name);
+      try {
+        const bundle = JSON.parse(readFileSync(full, "utf-8"));
+        if (bundle?.schemaVersion !== 1 || !Array.isArray(bundle.flows) || !bundle.flows.length) continue;
+        const title = typeof bundle.flows[0]?.name === "string" ? bundle.flows[0].name : "";
+        out.push({
+          name: title || entry.name.replace(/\.json$/i, ""),
+          slug: entry.name.replace(/\.json$/i, ""),
+          mtime: statSync(full).mtime.toISOString(),
+          bundle,
+        });
+      } catch { /* 手改坏的跳过 */ }
+    }
+    out.sort((a, b) => a.slug.localeCompare(b.slug));
+    return out;
+  }
+
   function status() {
     const has = installed();
     const ready = toolReady();
     const workflows = has ? readWorkflows() : [];
+    const flows = has ? readCanvasFlows() : [];
     const note = !has
       ? "没装《生图》插件（comfy）。装上之后这里才列得出工作流，出图本身也走它。"
       : !ready
         ? "《生图》插件在，但 comfy_generate 还没注册上——多半是它自己没加载成功，去控制台看它的报错。"
-        : workflows.length ? "" : "《生图》插件在，但 workflows 目录里没有 .json 工作流。去 ComfyUI 里导出 API 格式，放进那个目录。";
-    return { ok: has && ready, installed: has, toolReady: ready, dir: workflowsDir, workflows, note };
+        : workflows.length ? "" : "《生图》插件在，但 workflows 目录里没有 .json 工作流。去 ComfyUI 里点「存到 WhaleLife」导出一份。";
+    return { ok: has && ready, installed: has, toolReady: ready, dir: workflowsDir, flowsDir: canvasFlowsDir, workflows, flows, note };
   }
 
   ctx.tools.register({
     name: "comfy_workflow_list", displayName: "列生图工作流", danger: "safe",
     description: "列出生图插件（comfy）里可用的 ComfyUI 工作流文件名与大小，拿来填 comfy_generate 的 workflow。只读，不起任何任务；没装生图插件时也说清要先装什么。",
     schema: { type: "object", properties: {}, additionalProperties: false },
-    async run() { return status(); },
+    async run() { const current = status(); return { ok: current.ok, installed: current.installed, toolReady: current.toolReady, workflows: current.workflows, canvasFlows: current.flows.map(({ slug, name, mtime }) => ({ slug, name, mtime })), note: current.note }; },
   });
 
   ctx.web.page(pagePath, async (_req: any, res: any) => {
@@ -99,6 +132,9 @@ export async function apply(ctx: Context) {
     const rows = current.workflows.length
       ? current.workflows.map((w) => `<tr><td><code>${escape(w.name)}</code></td><td>${Math.round(w.size / 102.4) / 10} KB</td><td>${escape(w.mtime.slice(0, 19).replace("T", " "))}</td></tr>`).join("")
       : `<tr><td colspan="3" class="muted">没有工作流文件</td></tr>`;
+    const flowRows = current.flows.length
+      ? current.flows.map((f) => `<tr><td><code>${escape(f.slug)}</code></td><td>${escape(f.name)}</td><td>${escape(f.mtime.slice(0, 19).replace("T", " "))}</td></tr>`).join("")
+      : `<tr><td colspan="3" class="muted">还没有导出的功能包</td></tr>`;
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     res.end(html("ComfyUI 联动", `
 <section class="panel">
@@ -112,6 +148,12 @@ export async function apply(ctx: Context) {
   <p class="muted">目录：<code>${escape(current.dir)}</code></p>
   <table><thead><tr><th>文件名</th><th>大小</th><th>修改时间</th></tr></thead><tbody>${rows}</tbody></table>
   <p class="muted" style="margin-top:12px">在画布上的用法：放一个 comfy_generate 节点，workflow 填上面某个文件名；留空就用那边默认的。</p>
+</section>
+<section class="panel">
+  <h2>画布功能包（${current.flows.length}）</h2>
+  <p class="muted">目录：<code>${escape(current.flowsDir)}</code></p>
+  <table><thead><tr><th>标识</th><th>名称</th><th>导出时间</th></tr></thead><tbody>${flowRows}</tbody></table>
+  <p class="muted" style="margin-top:12px">在 ComfyUI 里连好节点、点「存到 WhaleLife」，就会多一份到这里；去思维画布点「注册功能」直接导入。</p>
 </section>`));
   }, { title: "ComfyUI 联动" });
 
@@ -121,5 +163,12 @@ export async function apply(ctx: Context) {
     res.end(JSON.stringify(current));
   });
 
-  ctx.logger.info(`ComfyUI 联动：工作流目录 ${workflowsDir}`);
+  // 画布「注册功能」的接口：整包给，前端拿到就直接走它自己的导入校验。
+  ctx.web.page(flowsPath, async (_req: any, res: any) => {
+    const current = status();
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ ok: current.installed, count: current.flows.length, flows: current.flows, note: current.note }));
+  });
+
+  ctx.logger.info(`ComfyUI 联动：工作流目录 ${workflowsDir}，功能包目录 ${canvasFlowsDir}`);
 }

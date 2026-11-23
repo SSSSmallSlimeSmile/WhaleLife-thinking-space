@@ -2105,6 +2105,45 @@ function importFlowBundle(value){
   newFlows.forEach(flow=>visit(flow.id));
   return {newFlows,newTools,rootId:identifiers.get(value.rootId)};
 }
+// 注册功能：把 ComfyUI 导出的画布功能包导进来。
+// 校验全走 importFlowBundle，这里只负责选哪个、报错怎么写——
+// 两套校验一旦分叉，迟早会有一边放过不该放的包。
+let registerFlowCache=new Map();
+function registerFlowError(error){showDialog('注册功能',`<p>${safe(error.message)}</p><div class="actions">${closeButton}</div>`);}
+function registerFlowBundle(bundle){
+  const {newFlows,newTools,rootId}=importFlowBundle(bundle);
+  flows.push(...newFlows);tools.push(...newTools);
+  if(dialog.open)dialog.close();
+  persist();openFlowCanvas(rootId);
+  return newFlows[0]?.name||'';
+}
+function pickRegisterFlow(slug){
+  const item=registerFlowCache.get(slug);
+  if(!item){registerFlowError(Error('这个功能包已经不在了，重新打开一次。'));return;}
+  try{registerFlowBundle(item.bundle);}catch(error){registerFlowError(error);}
+}
+function submitRegisterFlow(form){
+  const raw=new FormData(form).get('bundle');
+  let bundle;
+  try{bundle=JSON.parse(String(raw||''));}catch(error){registerFlowError(Error('不是合法 JSON：'+error.message));return;}
+  try{registerFlowBundle(bundle);}catch(error){registerFlowError(error);}
+}
+async function openRegisterFlowDialog(){
+  registerFlowCache=new Map();
+  let list='<p class="muted">正在读取 ComfyUI 联动…</p>';
+  try{
+    const response=await fetch('/plugins/thinking-space/comfy-bridge/flows',{cache:'no-store'});
+    if(!response.ok)throw Error('HTTP '+response.status);
+    const data=await response.json();
+    for(const item of data.flows||[]){if(item?.slug&&item.bundle)registerFlowCache.set(item.slug,item);}
+    list=registerFlowCache.size
+      ? `<ul class="register-flows">${[...registerFlowCache.values()].map(item=>`<li><button type="button" data-action="register-flow-pick" data-slug="${safe(item.slug)}">注册</button> <b>${safe(item.name)}</b> <code>${safe(item.slug)}</code> <span class="muted">${safe(String(item.mtime||'').slice(0,19).replace('T',' '))}</span></li>`).join('')}</ul>`
+      : '<p class="muted">还没有导出的功能包。去 ComfyUI 里连好节点，点「存到 WhaleLife」。</p>';
+  }catch(error){
+    list=`<p class="muted">读不到 ComfyUI 联动子插件（${safe(error.message)}）。可能没装或没起来；也可以把功能 JSON 粘贴到下面。</p>`;
+  }
+  showDialog('注册功能',`<section><h3>来自 ComfyUI（${registerFlowCache.size}）</h3>${list}</section><section style="margin-top:16px"><h3>或者粘贴功能 JSON</h3><form id="register-flow" class="dialog-grid"><label>功能 JSON<textarea name="bundle" rows="8" required placeholder='{"schemaVersion":1}'></textarea></label><div class="actions">${closeButton}<button class="primary">注册</button></div></form></section><p class="muted">导入的是画布的功能包，不是 ComfyUI 的 API 工作流。它只有一个 comfy_generate 节点，workflow 已经填好。</p>`);
+}
 async function loadFlowFile(input){
   const file=input.files?.[0];input.value='';
   if(!file)return;
@@ -2401,7 +2440,7 @@ function renderLibrary(){
   const interfaceOptions=[...new Set(entries.map(libraryInterface))].map(type=>[type,type]);
   const tagOptions=[...new Set(canvasContract.catalog.flatMap(entry=>entry.tags))].map(tag=>[tag,tag]);
   const options={plugin:[['','全部插件'],...pluginOptions],purpose:purposeOptions,tag:[['','全部任务标签'],...tagOptions],interface:[['','全部接口类型'],...interfaceOptions]}[library.mode];
-  main.innerHTML=`<section class="library"><div class="toolbar"><h1>工具库</h1><button data-action="sync-plugin-library" title="重新读取宿主已装插件提供的工具目录">同步插件库</button>${library.hostOnly?'<button data-action="restore-builtin" title="恢复页面内置的示例工具与静态清单">恢复内置清单</button>':''}${catalogControls()}<button class="primary" data-action="register">注册工具</button><button type="button" class="market-entry" data-store-open title="在悬浮窗里浏览 WhaleLife 插件商店">前往插件市场</button></div>
+  main.innerHTML=`<section class="library"><div class="toolbar"><h1>工具库</h1><button data-action="sync-plugin-library" title="重新读取宿主已装插件提供的工具目录">同步插件库</button>${library.hostOnly?'<button data-action="restore-builtin" title="恢复页面内置的示例工具与静态清单">恢复内置清单</button>':''}${catalogControls()}<button class="primary" data-action="register">注册工具</button><button data-action="register-flow" title="导入 ComfyUI 导出的功能包（画布格式）">注册功能</button><button type="button" class="market-entry" data-store-open title="在悬浮窗里浏览 WhaleLife 插件商店">前往插件市场</button></div>
   <div class="filters" role="group" aria-label="工具库分类" style="margin-top:18px">${toolLibraryModes.map(([mode,label])=>`<button data-action="tool-library-mode" data-mode="${mode}" class="${mode===library.mode?'primary':''}" aria-pressed="${mode===library.mode}">${label}</button>`).join('')}</div>
   <div class="filters"><input id="library-query" aria-label="搜索工具" placeholder="搜索接口、插件或用途" value="${safe(library.query)}">${options?`<select id="library-filter" aria-label="筛选当前分类">${optionsHtml(options,library.filter)}</select>`:''}<select id="contract-confidence" aria-label="按契约核实状态筛选">${optionsHtml([["","全部核实状态"],...Object.entries(contractConfidence)],library.verify)}</select></div>
   <div class="cards" id="cards"></div></section>`;
@@ -3125,6 +3164,8 @@ document.addEventListener('click',event=>{
       showDialog('工作流','<div class="actions"><button type="button" data-action="open-workflow">打开工作流</button><button type="button" data-action="import-flow">导入工作流</button><button type="button" class="primary" data-action="new-workflow">新建工作流</button></div>');break;
     case 'open-workflow':showWorkflowPicker();break;
     case 'new-workflow':openNewFlowDialog();break;
+    case 'register-flow':void openRegisterFlowDialog();break;
+    case 'register-flow-pick':pickRegisterFlow(button.dataset.slug);break;
     case 'register':
       showDialog('注册工具',`<form id="register-tool" class="dialog-grid"><label>工具名称<input name="name" required maxlength="32"></label><label>所属插件<input name="plugin" required maxlength="32"></label><label>用途<input name="category" required maxlength="24"></label><label>输入名称（可选）<input name="input" maxlength="24"></label><label>输出名称（可选）<input name="output" maxlength="24"></label><div class="actions">${closeButton}<button class="primary">注册</button></div></form>`);break;
     case 'dismiss':dialog.close();break;
@@ -3218,6 +3259,7 @@ document.addEventListener('keydown',event=>{
 });
 dialog.addEventListener('submit',event=>{
   event.preventDefault();
+  if(event.target.id==='register-flow'){submitRegisterFlow(event.target);return;}
   if(event.target.id==='save-canvas'){
     submitCanvasSave(event.target,event.submitter?.value==='new');
     return;
