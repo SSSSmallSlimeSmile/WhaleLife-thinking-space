@@ -1,0 +1,362 @@
+/*! Copyright (c) 2026 iinukami and contributors.
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
+ *
+ * 技能壳 · 固定子插件。
+ *
+ * 和上一版（每个壳一个目录、运行时生成程序文件）的根本区别：**这里不生成任何程序文件。**
+ * 程序是一次写好、随包发布的；运行时只往自己的 data/shells.json 里记一条，
+ * 按记录调用 ctx.tools.register() 把工具挂出去，删的时候注销。
+ *
+ * 这么做是因为：生成程序文件要把文件名、清单、子插件登记、重载、核对全串起来，
+ * 每一步都会留下半成品状态（待确认、幽灵记录、写一半的目录）。数据不用重载，
+ * 写坏了也只坏一条记录。
+ *
+ * 三条规矩：
+ * 1. 壳只记 skillId 和工具名，运行时调真技能（space_run），不复制技能内容。
+ * 2. 危险等级从技能本身推导，不由壳自己填——壳不能给自己降级。
+ * 3. 权限透传调用者：不写死 permission，也不无条件放行副作用。
+ *
+ * 不读别的插件的文件：技能目录靠 ctx.tools.call("space_skills") 问，
+ * 这是公开的工具接口，不碰磁盘、不猜路径。
+ */
+import type { Context, ToolSession } from "whalelife";
+
+/** 展示用字段：日常版宿主认识 displayName，上游宿主没有。原样传过去，不认识的宿主会忽略。 */
+declare module "whalelife" {
+  interface ToolDefinition<Arguments = Record<string, unknown>, Result = unknown> {
+    displayName?: string;
+  }
+}
+
+const pagePath = "/plugins/thinking-space/shells/";
+const apiBase = pagePath;
+const storeFile = "shells.json";
+
+type Danger = "safe" | "ask" | "full";
+
+interface Shell {
+  /** 技能 id，壳和技能靠它对齐。 */
+  skillId: string;
+  /** 宿主里的工具名，全局唯一。 */
+  toolName: string;
+  /** 工具显示名。 */
+  label: string;
+  /** 从技能推导出来的危险等级，不让壳自己填。 */
+  danger: Danger;
+  /** 加壳那一刻技能的版本，只在页面上比对，不参与运行。 */
+  skillRevision: number;
+  /** 关掉就不注册工具，记录还在。 */
+  enabled: boolean;
+  addedAt: string;
+}
+
+interface Store {
+  schemaVersion: number;
+  items: Shell[];
+}
+
+const EMPTY: Store = { schemaVersion: 1, items: [] };
+
+function escape(value: unknown) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** 工具名：只留字母数字下划线，长度限 60。名字全局唯一，撞了加后缀。 */
+function toToolName(skillId: string) {
+  const base = "skill_" + skillId.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase();
+  return (base.length > 60 ? base.slice(0, 60) : base) || "skill_tool";
+}
+
+function uniqueName(want: string, taken: Set<string>) {
+  if (!taken.has(want)) return want;
+  for (let n = 2; n < 100; n++) {
+    const candidate = want + "_" + n;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return want + "_" + Date.now().toString(36);
+}
+
+function html(title: string, body: string) {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)}</title>
+<style>
+:root{--line:rgba(127,127,127,.28);--surface:rgba(127,127,127,.06)}
+body{margin:0 auto;padding:28px 22px 60px;max-width:900px;font:15px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+h1{font-size:19px;margin:0 0 6px}
+.lead{opacity:.72;font-size:13px;margin:0 0 20px}
+.panel{border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:0 0 16px;background:var(--surface)}
+.panel>h2{margin:0 0 14px;padding-bottom:10px;font-size:15px;font-weight:700;border-bottom:1px solid var(--line)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{font-weight:600;font-size:12px;opacity:.7}
+tr:last-child td{border-bottom:0}
+.badge{display:inline-block;margin-right:6px;padding:1px 9px;border:1px solid var(--line);border-radius:999px;font-size:12px}
+.badge.warn{border-color:#c98;color:#a63}
+.badge.ok{border-color:#4a8;color:#2a7}
+.muted{opacity:.7;font-size:13px}
+button{padding:7px 15px;border-radius:9px;border:1px solid var(--line);background:transparent;color:inherit;font:inherit;font-weight:600;cursor:pointer}
+button.primary{border-color:#4a8;color:#2a7}
+button.danger{border-color:#c88;color:#a44}
+select,input[type=text]{width:100%;max-width:460px;padding:8px 11px;border:1px solid var(--line);border-radius:9px;background:transparent;color:inherit;font:inherit}
+.notice{padding:10px 14px;border:1px solid var(--line);border-radius:10px;margin:0 0 16px;font-size:14px}
+.notice.ok{border-color:#4a8}
+.notice.bad{border-color:#c88}
+code{font-family:ui-monospace,Consolas,monospace;font-size:13px}
+</style></head><body><h1>${escape(title)}</h1>${body}</body></html>`;
+}
+
+export async function apply(ctx: Context) {
+  /** 内存里的记录表，和 data/shells.json 对应。 */
+  let store: Store = { ...EMPTY, items: [] };
+  /** 当前注册出去的工具的注销函数，按 skillId 存。 */
+  const disposers = new Map<string, () => void>();
+  /** 最近一次操作的结果，只给页面看。 */
+  let lastNote = "";
+
+  async function readStore(): Promise<Store> {
+    try {
+      const raw = await ctx.config.read<Store>(storeFile);
+      if (!raw || !Array.isArray(raw.items)) return { ...EMPTY, items: [] };
+      const items = raw.items.filter(item => item && typeof item.skillId === "string" && typeof item.toolName === "string")
+        .map(item => ({
+          skillId: item.skillId,
+          toolName: item.toolName,
+          label: typeof item.label === "string" && item.label.trim() ? item.label : item.skillId,
+          danger: (item.danger === "full" || item.danger === "safe" ? item.danger : "ask") as Danger,
+          skillRevision: Number.isInteger(item.skillRevision) ? item.skillRevision : 0,
+          enabled: item.enabled !== false,
+          addedAt: typeof item.addedAt === "string" ? item.addedAt : new Date().toISOString(),
+        }));
+      return { schemaVersion: 1, items };
+    } catch {
+      return { ...EMPTY, items: [] };
+    }
+  }
+
+  async function saveStore() {
+    await ctx.config.save(storeFile, store);
+  }
+
+  /** 问父插件要技能列表，走公开的工具接口，不碰磁盘。 */
+  async function fetchSkills(): Promise<{ ok: boolean; items: any[]; error?: string }> {
+    try {
+      const raw: any = await ctx.tools.call("space_skills", {}, { permission: "ask" } as any);
+      const body = raw && raw.ok === true ? raw.result : null;
+      const items = Array.isArray(body?.skills) ? body.skills : [];
+      return { ok: true, items };
+    } catch (error) {
+      return { ok: false, items: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** 按一条记录注册工具。返回注销函数。 */
+  function registerShell(shell: Shell): () => void {
+    return ctx.tools.register({
+      name: shell.toolName,
+      displayName: shell.label,
+      danger: shell.danger,
+      description: `跑思维空间技能「${shell.skillId}」。壳只转发：步骤、参数、失败原因都以技能本身为准，技能改了壳跟着变。` +
+        `危险等级 ${shell.danger} 来自技能自己声明的步骤，不由壳指定。`,
+      schema: { type: "object", properties: {}, additionalProperties: false },
+      async run(_args: unknown, session: ToolSession) {
+        const started = Date.now();
+        try {
+          const raw: any = await ctx.tools.call("space_run", {
+            id: shell.skillId,
+            params: {},
+            // 壳的危险等级已经让宿主问过用户了，这里才放行副作用。
+            // safe 技能没有副作用步骤，传 false 也不会被拦。
+            confirmSideEffects: shell.danger !== "safe",
+            via: "self",
+          }, {
+            // 透传调用者的权限，不写死。
+            permission: session?.permission,
+            signal: session?.signal,
+            origin: { plugin: "thinking-space/shells", action: shell.skillId },
+          } as any);
+          if (!raw || raw.ok !== true) {
+            return { status: "failed", skill: shell.skillId, note: typeof raw?.result === "string" ? raw.result : "没拿到回执。" };
+          }
+          const result: any = raw.result && typeof raw.result === "object" ? raw.result : { status: "ok", raw: raw.result };
+          const note = result.status === "ok" ? "跑完了。" : String(result.error ?? "没跑成。");
+          return {
+            status: String(result.status ?? "ok"),
+            skill: shell.skillId,
+            runId: result.runId ?? null,
+            steps: Array.isArray(result.steps) ? result.steps.length : 0,
+            note,
+            ...(result.staleDefinition ? { staleDefinition: result.staleDefinition } : {}),
+            took: Date.now() - started,
+          };
+        } catch (error) {
+          return { status: "failed", skill: shell.skillId, note: error instanceof Error ? error.message : String(error), took: Date.now() - started };
+        }
+      },
+    });
+  }
+
+  /** 把内存记录和实际注册对齐。 */
+  function syncRegistrations() {
+    const wanted = new Map(store.items.filter(item => item.enabled).map(item => [item.skillId, item]));
+    // 注销不再需要的
+    for (const [skillId, dispose] of disposers) {
+      if (!wanted.has(skillId)) {
+        try { dispose(); } catch { /* 注销失败不影响后面 */ }
+        disposers.delete(skillId);
+      }
+    }
+    // 注册新的 / 名字变了的
+    for (const shell of wanted.values()) {
+      const had = store.items.find(item => item.skillId === shell.skillId);
+      if (!had) continue;
+      if (!disposers.has(shell.skillId)) {
+        try {
+          disposers.set(shell.skillId, registerShell(shell));
+        } catch (error) {
+          lastNote = `工具 ${shell.toolName} 注册失败：${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+    }
+  }
+
+  /** 删掉一条记录并注销工具。只动自己的数据。 */
+  async function removeShell(skillId: string) {
+    const idx = store.items.findIndex(item => item.skillId === skillId);
+    if (idx < 0) return false;
+    const dispose = disposers.get(skillId);
+    if (dispose) {
+      try { dispose(); } catch { /* 已经没了就算了 */ }
+      disposers.delete(skillId);
+    }
+    store.items.splice(idx, 1);
+    await saveStore();
+    return true;
+  }
+
+  // —— 启动：读记录、注册 ——
+  store = await readStore();
+  syncRegistrations();
+
+  // —— 页面 ——
+  async function renderPanel(note: string, tone: "ok" | "bad" | "") {
+    const { ok: skillsOk, items: skills, error: skillsError } = await fetchSkills();
+    const taken = new Set<string>(store.items.map(item => item.toolName));
+    const revisions = new Map<string, number>(skills.map(item => [String(item.id), Number(item.revision ?? 0)]));
+
+    const rows = store.items.map(item => {
+      const nowRev = revisions.get(item.skillId);
+      const drift = nowRev !== undefined && nowRev !== item.skillRevision;
+      const missing = skillsOk && nowRev === undefined;
+      return `<tr>
+  <td><code>${escape(item.skillId)}</code><div class="muted">${escape(item.label)}</div></td>
+  <td><code>${escape(item.toolName)}</code></td>
+  <td><span class="badge${item.danger === "safe" ? "" : " warn"}">${escape(item.danger)}</span></td>
+  <td>${item.enabled ? '<span class="badge ok">已注册</span>' : '<span class="badge warn">已关</span>'}
+    ${missing ? '<span class="badge warn">技能已不在</span>' : ""}
+    ${drift ? `<span class="badge warn">rev ${item.skillRevision}→${nowRev}</span>` : ""}</td>
+  <td><form method="post" action="${apiBase}remove" style="margin:0"><input type="hidden" name="skillId" value="${escape(item.skillId)}"><button class="danger" type="submit">删除壳</button></form></td>
+</tr>`;
+    }).join("");
+
+    const options = (skillsOk ? skills : [])
+      .filter(item => !store.items.some(shell => shell.skillId === String(item.id)))
+      .map(item => `<option value="${escape(item.id)}">${escape(item.name)}（${escape(item.kind)} · ${Number(item.stepCount ?? 0)} 步 · ${escape(item.danger)}）</option>`)
+      .join("");
+
+    const notice = note ? `<p class="notice ${tone}">${escape(note)}</p>` : "";
+
+    return html("技能壳", `
+<p class="lead">把技能注册成工具入口。程序在这里一次写好，加壳删壳只动一个数据文件，不生成程序文件、不改 <code>plugin.yaml</code>、不重载。</p>
+${notice}
+<section class="panel">
+  <h2>现在的壳（${store.items.length}）</h2>
+  ${store.items.length ? `<table><thead><tr><th>技能</th><th>工具名</th><th>危险</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : '<p class="muted" style="margin:0">还没有。下面挑一条技能加壳。</p>'}
+</section>
+<section class="panel">
+  <h2>加一个壳</h2>
+  ${skillsOk
+    ? (options ? `<form method="post" action="${apiBase}add">
+    <select name="skillId">${options}</select>
+    <p class="muted" style="margin-top:10px">危险等级从技能自己声明的步骤推导，不让壳自己填；工具名按技能 id 生成，撞了自动加后缀。</p>
+    <p style="margin-top:12px"><button class="primary" type="submit">加壳</button></p>
+  </form>` : '<p class="muted" style="margin:0">技能库里每一条都已经有壳了，或者一条技能都没有。</p>')
+    : `<p class="muted" style="margin:0">读不到技能列表：${escape(skillsError ?? "未知原因")}。父插件可能没装或没启用。</p>`}
+</section>
+<section class="panel">
+  <h2>为什么是一个数据文件</h2>
+  <p class="muted" style="margin:0">上一版每个壳生成一个子插件目录、改父 <code>plugin.yaml</code> 的 <code>sub:</code>、再重载宿主。
+  那条路上每一步都会留半成品：待确认的发布、点开 404 的幽灵页、写一半的目录。
+  现在壳是固定的程序，记录落在 <code>data/shells.json</code>：加一条就注册一个工具，删一条就注销一个，立刻生效，不用重载。</p>
+</section>`);
+  }
+
+  ctx.web.page(pagePath, async (req: any, res: any) => {
+    try {
+      const note = String(new URL(req.url ?? "/", "http://local").searchParams.get("note") ?? "");
+      const tone = String(new URL(req.url ?? "/", "http://local").searchParams.get("tone") ?? "") as "ok" | "bad" | "";
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(await renderPanel(note, tone === "ok" || tone === "bad" ? tone : ""));
+    } catch (error) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(html("技能壳", `<p>暂时读不到状态：${escape(error instanceof Error ? error.message : "")}</p>`));
+    }
+  }, { title: "技能壳", settings: true });
+
+  async function readForm(req: any) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    return new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+  }
+
+  function redirect(res: any, note: string, tone: "ok" | "bad") {
+    res.writeHead(303, { Location: pagePath + "?tone=" + tone + "&note=" + encodeURIComponent(note) });
+    res.end();
+  }
+
+  ctx.web.api(apiBase + "add", async (req: any, res: any) => {
+    try {
+      const form = await readForm(req);
+      const skillId = String(form.get("skillId") ?? "").trim();
+      if (!skillId) return redirect(res, "没选技能。", "bad");
+      if (store.items.some(item => item.skillId === skillId)) return redirect(res, "这条技能已经有壳了。", "bad");
+
+      // 校验技能真的存在，并拿它的危险等级。
+      const { ok, items, error } = await fetchSkills();
+      if (!ok) return redirect(res, "读不到技能列表：" + (error ?? "未知原因"), "bad");
+      const skill = items.find(item => String(item.id) === skillId);
+      if (!skill) return redirect(res, "技能库里没有 " + skillId + "。", "bad");
+
+      const danger: Danger = skill.danger === "safe" || skill.danger === "full" ? skill.danger : "ask";
+      const taken = new Set<string>(store.items.map(item => item.toolName));
+      const shell: Shell = {
+        skillId,
+        toolName: uniqueName(toToolName(skillId), taken),
+        label: String(skill.name ?? skillId).slice(0, 40),
+        danger,
+        skillRevision: Number(skill.revision ?? 0),
+        enabled: true,
+        addedAt: new Date().toISOString(),
+      };
+      store.items.push(shell);
+      await saveStore();
+      syncRegistrations();
+      return redirect(res, `已加壳：工具 ${shell.toolName} 现在就出现在工具表里了。`, "ok");
+    } catch (error) {
+      return redirect(res, "没加成：" + (error instanceof Error ? error.message : String(error)), "bad");
+    }
+  });
+
+  ctx.web.api(apiBase + "remove", async (req: any, res: any) => {
+    try {
+      const form = await readForm(req);
+      const skillId = String(form.get("skillId") ?? "").trim();
+      const gone = await removeShell(skillId);
+      return redirect(res, gone ? "已删除，工具当场注销。" : "没有这条记录。", gone ? "ok" : "bad");
+    } catch (error) {
+      return redirect(res, "没删成：" + (error instanceof Error ? error.message : String(error)), "bad");
+    }
+  });
+
+  ctx.logger.info(`技能壳：${store.items.filter(item => item.enabled).length} 个工具已注册（共 ${store.items.length} 条记录）`);
+}

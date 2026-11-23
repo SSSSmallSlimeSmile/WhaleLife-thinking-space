@@ -1,0 +1,68 @@
+# 技能壳（thinking-space/shells）
+
+把思维空间的技能注册成工具入口的固定子插件。
+
+**它不生成任何程序文件。** 程序在这里一次写好、随包发布；运行时只往自己的 `data/shells.json` 里记一条，按记录调用 `ctx.tools.register()` 把工具挂出去，删的时候注销。
+
+## 为什么改成一个固定插件
+
+上一版是「每个壳一个子插件目录」：加壳要往 `sub/` 写 `index.ts` 和 `plugin.yaml`、改父插件 `plugin.yaml` 的 `sub:`、调 `POST /api/plugin` 重载、再拿 `/api/status` 和探针核对。那条路上每一步都会留下半成品：
+
+- 重载断线后不知道新代码上没上 → "待确认"卡住
+- 删了目录、记录还在 → 点开 404 的幽灵页
+- 写一半的目录、备份、回滚、墓碑
+
+宿主对运行时改写程序文件也有明确要求（issue #9 第 19 条）：运行时生成的东西留在插件数据目录，通过公开接口提供调用。
+
+现在壳是固定的程序，记录落在 `data/shells.json`。加一条就注册一个工具，删一条就注销一个，**立刻生效，不用重载**。
+
+## 它做什么
+
+每个壳对应一条技能。工具被调用时：
+
+1. 用调用者的权限（`session.permission`）去调 `space_run`，不写死
+2. `confirmSideEffects` 按壳的危险等级给：壳不是 `safe` 时宿主已经让用户确认过这个工具，这里才放行副作用
+3. 把 `space_run` 的回执原样转述，包括 `staleDefinition`（技能在运行期间被改过）
+
+危险等级**从技能自己声明的步骤推导**，页面加壳时直接读 `space_skills` 返回的 `danger`，壳不能自己填。
+
+## 数据文件
+
+```json
+{
+  "schemaVersion": 1,
+  "items": [
+    {
+      "skillId": "test-comfy-two-step",
+      "toolName": "skill_test_comfy_two_step",
+      "label": "测试·出图两段",
+      "danger": "safe",
+      "skillRevision": 2,
+      "enabled": true,
+      "addedAt": "2026-11-23T14:35:46.867Z"
+    }
+  ]
+}
+```
+
+工具名按技能 id 生成（非字母数字转下划线，长度 60），撞了自动加 `_2`。
+
+## 页面
+
+`/plugins/thinking-space/shells/`（设置页），列出当前壳、从技能列表里挑一条加壳、删除壳。加壳时如果技能不存在或已有壳会直接说原因。
+
+## 不读别的插件的文件
+
+技能目录靠 `ctx.tools.call("space_skills", {}, { permission: "ask" })` 问，这是公开的工具接口。不 `existsSync` 别人的目录，不猜路径，不读宿主 `config.json`。
+
+> 注意 `permission` 只接受 `off | ask | full`。传别的值（比如 `safe`）会被当成"需要审批"，M0 宿主没有审批流，直接失败。
+
+## 依赖
+
+`depends: [web, tools]`。不需要写 `comfy` 这类具体插件——壳只依赖 `space_run` 和 `space_skills`，那是父插件的工具，不是别的插件的服务。缺工具时会在运行时报出来，不会拦住加载。
+
+## 已知边界
+
+- 工具重名会抛错（宿主 `add()` 里 `entries.has(name)` 直接 throw）。所以更新一条壳要先注销再注册，代码里 `syncRegistrations()` 按 skillId 管理 disposer 就是这个原因。
+- 重载父插件会连带重启这个子插件，正在跑的调用会断——那是宿主的生命周期，不是这里能控制的。
+- `enabled: false` 的记录不注册工具，记录还在。
