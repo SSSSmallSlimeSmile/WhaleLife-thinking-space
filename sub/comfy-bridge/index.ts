@@ -135,6 +135,11 @@ details summary{cursor:pointer;font-size:12.5px;opacity:.8}
 .node b{font-weight:600}
 .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;align-items:center}
 .provider{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:0 0 10px}
+.provider>summary{cursor:pointer;font-size:14px;font-weight:600;list-style:none;padding:2px 0}
+.provider>summary::-webkit-details-marker{display:none}
+.provider>summary::before{content:"▸";display:inline-block;width:16px;color:var(--muted)}
+.provider[open]>summary::before{content:"▾"}
+.provider>summary .hint{margin-left:8px}
 .provider h3{margin:0 0 6px;font-size:14px}
 </style></head><body><h1>${escape(title)}</h1>${body}</body></html>`;
 }
@@ -397,7 +402,7 @@ export async function apply(ctx: Context) {
       `<span class="badge${current.flows.length ? "" : " warn"}">功能包 ${current.flows.length} 个${current.rejected ? ` · 隐藏 ${current.rejected}` : ""}</span>`,
       `<span class="badge${current.broken.length ? " bad" : " ok"}">缺工作流的包 ${current.broken.length} 个</span>`,
       `<span class="badge">已导入画布 ${current.flows.filter((flow) => flow.registered).length} 个</span>`,
-      `<span class="badge">外部来源 ${current.providers.length} 个</span>`,
+      `<span class="badge">功能 ${current.providers.length + 1} 个（外部 ${current.providers.length}）</span>`,
       `<span class="badge">画布 <code>${escape(settings.canvasUrl)}</code></span>`,
     ].join("");
 
@@ -445,8 +450,8 @@ export async function apply(ctx: Context) {
         const inputs = provider.fields.length
           ? provider.fields.map((field) => `<label>${escape(field.label)} <input type="text" name="s_${escape(field.key)}" value="${escape(provider.settings[field.key] ?? "")}" placeholder="${escape(field.placeholder ?? "")}"></label>`).join("")
           : `<span class="muted">这个来源没有声明设置项</span>`;
-        return `<div class="provider">
-  <h3>${escape(provider.name)} <code>${escape(provider.id)}</code></h3>
+        return `<details class="provider">
+  <summary>${escape(provider.name)}<span class="hint"><code>${escape(provider.id)}</code> · 包 ${own.length} 个</span></summary>
   ${provider.description ? `<p class="muted" style="margin:0 0 8px">${escape(provider.description)}</p>` : ""}
   <p class="muted" style="margin:0 0 8px">推上来 ${own.length} 个包${own.length ? `：${own.map((flow) => `<code>${escape(flow.slug)}</code>`).join("、")}` : ""}</p>
   <form method="post" action="${escape(providersPath)}">
@@ -455,9 +460,24 @@ export async function apply(ctx: Context) {
     <button type="submit" name="action" value="save">保存</button>
     <button type="submit" name="action" value="delete" class="danger">移除来源</button>
   </form>
-</div>`;
+</details>`;
       }).join("")
-      : `<p class="muted">还没有外部来源。别的软件可以往下看「给别的软件用」那段，推一个包过来就会出现在这里。</p>`;
+      : `<p class="muted">还没有外部功能来源。别的软件可以往下看「给别的软件用」那段，推一个包过来就会多一项，默认折叠。</p>`;
+
+    const comfyBlock = `<details class="provider">
+  <summary>ComfyUI<span class="hint">工作流 ${current.workflows.length} 个 · 默认 ${settings.defaultWorkflow ? escape(settings.defaultWorkflow) : "未指定"} · 页面 ${settings.strict ? "只列合格包" : "全列"}</span></summary>
+  <form method="post" action="${escape(settingsPath)}">
+    <label><input type="checkbox" name="strict" value="1"${settings.strict ? " checked" : ""}> 只列出能通过画布校验的包</label>
+    <label>默认工作流 <input type="text" name="defaultWorkflow" value="${escape(settings.defaultWorkflow)}" placeholder="例如 nova-anime.json（留空则不指定）"></label>
+    <label>画布地址 <input type="text" name="canvasUrl" value="${escape(settings.canvasUrl)}" placeholder="http://127.0.0.1:9281"></label>
+    <button type="submit">保存</button>
+  </form>
+  <p class="muted" style="margin-top:10px">默认工作流只影响这里和工具回执里的提示；画布节点上没填 workflow 时用哪个，仍由画布和《生图》插件决定。画布地址只用来拼「打开这条流程」的链接，页面不会去连它。</p>
+  <h2 style="font-size:14px;margin:18px 0 10px">工作流（${current.workflows.length}）</h2>
+  <p class="muted">目录：<code>${escape(current.dir)}</code></p>
+  <table><thead><tr><th>文件名</th><th>大小</th><th>修改时间</th></tr></thead><tbody>${workflowRows}</tbody></table>
+  <p class="muted" style="margin-top:12px">在画布上的用法：放一个 comfy_generate 节点，workflow 填上面某个文件名；留空就用那边默认的。</p>
+</details>`;
 
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     res.end(html("思维画布桥", `
@@ -475,8 +495,9 @@ export async function apply(ctx: Context) {
   <p class="muted" style="margin-top:12px">在 ComfyUI 里连好节点、点「存到 WhaleLife」，就会多一份到这里；去思维画布点「注册功能」直接导入。默认工作流：<code>${settings.defaultWorkflow ? escape(settings.defaultWorkflow) : "（未指定）"}</code></p>
 </section>
 <section class="panel">
-  <h2>外部来源（${current.providers.length}）</h2>
-  <p class="muted">别的软件把自己画好的流程推过来，落成和 ComfyUI 扩展同一个格式，画布那边一视同仁。每个来源自己的设置存在这里，不经过画布。</p>
+  <h2>功能（${current.providers.length + 1}）</h2>
+  <p class="muted">每一项是一个功能来源，默认折叠，点开才展开设置。第一个是内置的 ComfyUI，下面是别的软件推过来的；推一个包过来就会自动多一项。</p>
+  ${comfyBlock}
   ${providerBlocks}
   <details>
     <summary>给别的软件用：接口怎么写</summary>
@@ -511,21 +532,7 @@ export async function apply(ctx: Context) {
   </tbody></table>
   <p class="muted">完整模板和注意事项写在插件的 <code>README.md</code> 里，跟着包一起发出去。</p>
 </section>
-<details class="panel">
-  <summary>ComfyUI<span class="hint">工作流 ${current.workflows.length} 个 · 默认 ${settings.defaultWorkflow ? escape(settings.defaultWorkflow) : "未指定"} · 页面 ${settings.strict ? "只列合格包" : "全列"}</span></summary>
-  <h2 style="font-size:14px;margin:0 0 10px">设置</h2>
-  <form method="post" action="${escape(settingsPath)}">
-    <label><input type="checkbox" name="strict" value="1"${settings.strict ? " checked" : ""}> 只列出能通过画布校验的包</label>
-    <label>默认工作流 <input type="text" name="defaultWorkflow" value="${escape(settings.defaultWorkflow)}" placeholder="例如 nova-anime.json（留空则不指定）"></label>
-    <label>画布地址 <input type="text" name="canvasUrl" value="${escape(settings.canvasUrl)}" placeholder="http://127.0.0.1:9281"></label>
-    <button type="submit">保存</button>
-  </form>
-  <p class="muted" style="margin-top:10px">默认工作流只影响这里和工具回执里的提示；画布节点上没填 workflow 时用哪个，仍由画布和《生图》插件决定。画布地址只用来拼「打开这条流程」的链接，页面不会去连它。</p>
-  <h2 style="font-size:14px;margin:18px 0 10px">工作流（${current.workflows.length}）</h2>
-  <p class="muted">目录：<code>${escape(current.dir)}</code></p>
-  <table><thead><tr><th>文件名</th><th>大小</th><th>修改时间</th></tr></thead><tbody>${workflowRows}</tbody></table>
-  <p class="muted" style="margin-top:12px">在画布上的用法：放一个 comfy_generate 节点，workflow 填上面某个文件名；留空就用那边默认的。</p>
-</details>`));
+`));
   }, { title: "思维画布桥", settings: true });
 
   // 表单提交走这里。保存完 303 回页面，免得刷新重发。
