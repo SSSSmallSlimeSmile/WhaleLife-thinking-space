@@ -19,16 +19,32 @@ plugins/
       plugin.yaml
       README.md
       data/                    ← 设置、来源登记、来源推包的账
-  comfy/                       ← 兄弟目录，由本插件只读
+  comfy/                       ← 兄弟目录，只通过它公开的 comfy.assets 服务访问，不直接读盘
     plugin.yaml
     workflows/                 ← ComfyUI 的 API 格式工作流，comfy_generate 用
     canvas-flows/              ← 画布功能包，画布「注册功能」用
 ```
 
-- `plugin.yaml` 里写的是 `depends: [web]`，**不是** `depends: [comfy]`。
-  宿主的 `depends` 认的是**服务名**（`ctx.provide` 注册过的），不是插件 id。写成 `comfy` 会永远停在 `blocked 等待依赖：comfy`。
-- 生图插件在不在，是**运行时探**的：看 `plugins/comfy/plugin.yaml` 在不在，再看 `comfy_generate` 有没有注册上。
-- 生图插件不在时，本插件照常起来，只是页面和工具回执里写明「要先装什么」。这是有意的：画布页少一块，用户不知道原因。
+- `plugin.yaml` 里写的是 `depends: [web]`，**不是** `depends: [comfy]`。读工作流走的是**公开服务**（见下节），
+  服务不在就降级，不该把整个插件卡在 `blocked`。
+- **本插件不读别的插件的目录**：不 `existsSync(plugins/comfy/plugin.yaml)`、不读别人的 `workflows/`。
+  这是作者在 issue #9 里明确要求的，跨插件读磁盘一律不算。
+- 生图插件不在、或版本太老没提供下面那个服务时，本插件照常起来，页面和回执里写明「当前版本不支持自动列出工作流」，
+  手动导入功能包和出图照常。这是有意的：画布页少一块，用户不知道原因。
+
+## 依赖的服务：`comfy.assets`
+
+生图插件（`comfy` ≥ 0.3.1）在 `apply()` 里 `ctx.provide("comfy.assets", …)`，四个方法：
+
+| 方法 | 作用 |
+|---|---|
+| `listWorkflows()` | 列 `workflows/` 下的 `.json`：`{name, size, mtime}` |
+| `listFlows()` | 列 `canvas-flows/` 下的画布功能包（已解析过的 bundle + 校验问题） |
+| `saveFlow(name, bundle)` | 写一个功能包，返回落盘路径 |
+| `deleteFlow(slug)` | 删一个功能包，返回是否真删了 |
+
+本插件用 `optionalDepends: [comfy]` + `ctx.optional("comfy.assets", …)` 订阅：服务上线下线都能感知，
+页面刷新时重新取一次。拿不到服务，所有读写能力一起降级——**不假装能用**。
 
 ---
 

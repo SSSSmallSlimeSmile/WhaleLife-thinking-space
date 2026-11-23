@@ -139,6 +139,9 @@ h1{font-size:19px;margin:0 0 6px}
 .lead{opacity:.72;font-size:13px;margin:0 0 20px}
 .panel{border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:0 0 16px;background:var(--surface)}
 .panel>h2{margin:0 0 14px;padding-bottom:10px;font-size:15px;font-weight:700;border-bottom:1px solid var(--line)}
+.cost{margin:0;padding-left:20px;font-size:13px;line-height:1.75}
+.cost li{margin:6px 0}
+.cost b{font-weight:600}
 table{width:100%;border-collapse:collapse;font-size:14px}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
 th{font-weight:600;font-size:12px;opacity:.7}
@@ -361,12 +364,23 @@ export async function apply(ctx: Context) {
     const notice = note ? `<p class="notice ${tone}">${escape(note)}</p>` : "";
 
     return html("技能壳", `
-<p class="lead">把技能注册成工具入口。程序在这里一次写好，加壳删壳只动一个数据文件，不生成程序文件、不改 <code>plugin.yaml</code>、不重载。</p>
+<p class="lead">把技能注册成工具入口。程序在这里一次写好，加壳删壳只动一个数据文件，不生成程序文件、不改 <code>plugin.yaml</code>、不重载。<b>但每个壳都是常驻成本，能不加就不加——加之前先看下面那块。</b></p>
 ${notice}
 <section class="panel">
   <h2>现在的壳（${store.items.length}）</h2>
   ${store.items.length ? `<table><thead><tr><th>技能</th><th>工具名</th><th>危险</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
     : '<p class="muted" style="margin:0">还没有。下面挑一条技能加壳。</p>'}
+</section>
+<section class="panel" style="border-color:rgba(200,140,60,.55)">
+  <h2>加壳的代价</h2>
+  <ul class="cost">
+    <li><b>每轮都在付 token。</b>一个壳就是一个常驻工具，工具定义每轮请求都发；不用它也在付。壳多了，小上下文模型还没开始聊就撑满了。</li>
+    <li><b>所有壳共用一个进程。</b>以前一个壳一个子插件，崩一个不连坐；现在全在 <code>thinking-space/shells</code> 里，它挂了壳一起没。</li>
+    <li><b>技能改了参数，要重载一次子插件。</b>加壳删壳立刻生效，但技能自己改了参数声明，工具表不会自己跟上。</li>
+    <li><b>依赖一个没写进契约的能力。</b>「apply 之后注册工具」是实测能用的，作者没在插件契约里承诺过；哪天收紧，这里要重做。</li>
+    <li><b>壳不等于技能。</b>删壳只是注销工具，技能还在；反过来技能删了，壳留在那儿但一调就失败。</li>
+  </ul>
+  <p class="muted" style="margin:12px 0 0"><b>先让技能跑熟，再考虑固化成壳。</b>一次性的、只自己偶尔用的、带一堆参数的，都别加——直接让模型 <code>space_run</code> 就行。壳只为两种情况存在：<b>必须每轮被看见</b>，或者<b>要交给别人用</b>。</p>
 </section>
 <section class="panel">
   <h2>加一个壳</h2>

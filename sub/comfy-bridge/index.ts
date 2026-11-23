@@ -126,7 +126,8 @@ details.panel>summary .hint{margin-left:auto;font-weight:400;font-size:12.5px;op
 .muted{opacity:.72;font-size:13px}
 table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-th{font-weight:600;opacity:.75}
+th{font-weight:600;opacity:.75;white-space:nowrap;padding-right:14px}
+td{word-break:break-word}
 code{font-size:12.5px}
 pre{background:rgba(127,127,127,.1);border-radius:10px;padding:10px 12px;overflow:auto;font-size:12px;line-height:1.5}
 form{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:4px}
