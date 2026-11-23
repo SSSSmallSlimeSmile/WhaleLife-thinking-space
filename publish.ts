@@ -1058,7 +1058,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
           : `<span class="badge">未发布</span><div class="space-muted">现在 rev ${hooks.escape(String(nowRevision))}</div>`;
         return `<tr><td>${hooks.escape(skill.name)}<div class="space-muted"><code>${hooks.escape(skill.id)}</code></div></td>` +
           `<td>${skill.steps.length} 步</td><td>${state}</td>` +
-          `<td><button data-publish="${hooks.escape(skill.id)}">发布</button>` +
+          `<td><button data-publish="${hooks.escape(skill.id)}">发布并验收</button>` +
           (record ? ` <button data-rollback="${hooks.escape(record.subId)}">回退</button>` : "") +
           (record ? ` <button data-delete="${hooks.escape(record.subId)}">删除壳</button>` : "") +
           (record && record.stage === "written" && record.publishId ? ` <button data-resume="${hooks.escape(record.publishId)}">核对</button>` : "") +
@@ -1179,7 +1179,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         "  const tries = reload.kind === \"ok\" ? 5 : 6;",
         "  const outcome = await settle(job, tries, 1200);",
         "  say(\"核对：\" + JSON.stringify(outcome));",
-        "  if (outcome.state === \"ok\") { say(\"发布完成：\" + job.subId + \" v\" + job.version); return { state: \"ok\", subId: job.subId }; }",
+        "  if (outcome.state === \"ok\") { say(\"发布完成：\" + job.subId + \" v\" + job.version + \" · 1.2 秒后刷新列表\"); setTimeout(() => location.reload(), 1200); return { state: \"ok\", subId: job.subId }; }",
         "  if (outcome.state === \"disabled\") { say(\"已写入，保持停用。启用这个子插件后再核对。\"); return { state: \"disabled\", subId: job.subId }; }",
         "  if (outcome.state === \"unknown\") { say(\"重载结果待确认：连宿主状态都查不到。没有自动回退。\"); showResume(job); return { state: \"unknown\", subId: job.subId }; }",
         "  say(\"重载没有换到新版本：\" + outcome.detail);",
@@ -1210,7 +1210,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         "document.querySelectorAll(\"[data-rollback]\").forEach((button) => button.addEventListener(\"click\", async () => {",
         "  const back = await api(\"/plugins/thinking-space/shells/rollback\", { subId: button.dataset.rollback, reason: \"手动回退\" });",
         "  say(\"回退：\" + JSON.stringify(back));",
-        "  if (back.ok) await reloadParent(back.reloadId);",
+        "  if (back.ok) { await reloadParent(back.reloadId); say(\"已回退 · 1.2 秒后刷新列表\"); setTimeout(() => location.reload(), 1200); }",
         "}));",
         "document.querySelectorAll(\"[data-resume]\").forEach((button) => button.addEventListener(\"click\", () => resume(button.dataset.resume)));",
         "window.__shells = { full: full, settle: settle, finish: finish, resume: resume, reloadParent: reloadParent, probe: probe, pendingHas: pendingHas, pluginEntry: pluginEntry };",
@@ -1218,7 +1218,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         "  if (!confirm(\"删除这个壳？目录和登记都会消失，技能本身不动。\")) return;",
         "  const out = await api(\"/plugins/thinking-space/shells/delete\", { subId: button.dataset.delete });",
         "  say(\"删除：\" + JSON.stringify(out));",
-        "  if (out.ok) await reloadParent(out.reloadId || \"thinking-space\");",
+        "  if (out.ok) { await reloadParent(out.reloadId || \"thinking-space\"); say(\"已删除 · 1.2 秒后刷新列表\"); setTimeout(() => location.reload(), 1200); }",
         "}));",
       ].join("\n");
       const body = `<div class="space-wrap"><p class="space-lede">发布不是保存。保存技能只写技能库；发布才会生成子插件目录、改父清单，然后要重载一次才生效。` +
@@ -1226,7 +1226,6 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         `<p class="space-lede">壳只从这一页发布：技能先存在下面的功能库或复合功能库里，再来生成壳。画布上的「发布到思维空间」发的是技能，不是壳。</p>` +
         (pendingRows ? `<p class="space-lede">待确认的发布：</p><ul class="space-list">` + pendingRows + `</ul>` : "") +
         `<div id="resume" class="space-muted"></div>
-<p class="space-toolbar"><button id="publish-all-verify">发布并验收（自动重载）</button></p>
 ` +
         sections + orphanPanel + `
 <pre id="report"></pre>
