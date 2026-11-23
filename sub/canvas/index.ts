@@ -8,8 +8,8 @@
  * 1. 画布是独立的 node 进程，端口和脚本都由自己管，不再塞进父插件的设置页。
  * 2. 画布进程「跟着思维空间走」：父插件一停，宿主会先把子插件停掉，这里的
  *    effect 清理负责把进程一起收掉。不要这个行为，就在设置页把开关关掉。
- * 3. 画布要连的是「这个宿主」，不是脚本里默认的 9270：端口从宿主
- *    config/config.json 的 web.port 读，读不到才退回脚本默认值。
+ * 3. 画布要连的是「这个宿主」，但地址不猜、也不读宿主的 config.json：
+ *    由用户在设置页确认一次（第一次打开自动填当前地址），存在自己的配置里。
  */
 import type { Context } from "whalelife";
 import type { ChildProcess } from "node:child_process";
@@ -43,8 +43,33 @@ const DEFAULTS = {
   stopWithSpace: true,
   /** 本实例的归属标识：只用来认自己拉起来的画布，不进设置页。 */
   ownerToken: "",
+  /**
+   * 这个宿主自己的地址（例如 http://127.0.0.1:9270）。画布靠它连回宿主。
+   * 不猜端口、不读宿主的 config/config.json：地址由用户在设置页确认一次。
+   */
+  upstreamUrl: "",
 };
 type Config = typeof DEFAULTS;
+
+/** 只收 http(s) 地址，存成不带结尾斜杠的形式；别的一律当空。 */
+function normalizeUrl(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return (url.origin + url.pathname).replace(/\/+$/, "");
+  } catch { return ""; }
+}
+
+/** 地址里的端口。没写端口就按协议默认值。 */
+function portOf(value: string): number | null {
+  try {
+    const url = new URL(value);
+    const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+  } catch { return null; }
+}
 
 function escape(value: unknown) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -96,6 +121,7 @@ export async function apply(ctx: Context) {
         canvasScript: script,
         stopWithSpace: saved?.stopWithSpace !== false,
         ownerToken: typeof saved?.ownerToken === "string" ? saved.ownerToken.trim() : "",
+        upstreamUrl: normalizeUrl(saved?.upstreamUrl),
       };
     } catch { /* 读不到就用默认 */ }
     // 归属标识要跨重载存活：重载后 canvasHostPid 没了，但进程还是这个实例拉起来的。
@@ -159,22 +185,22 @@ export async function apply(ctx: Context) {
     return ok;
   }
 
-  /** 读宿主自己的端口：config/config.json 里的 web.port 才是准的。 */
-  function locateUpstream(port: number): { root: string; port: number } | null {
-    const argRoots = process.argv
-      .filter((item) => /^[A-Za-z]:[\\/]/.test(item) && !/\.[A-Za-z0-9]{1,6}$/.test(item))
-      .map((item) => resolve(item));
-    const bases = [...argRoots, process.cwd(), resolve(process.cwd(), ".."), resolve(process.cwd(), "..", "..")];
-    for (const base of bases) {
-      const configFile = join(base, "config", "config.json");
-      if (!existsSync(configFile)) continue;
+  /** 画布要连的宿主端口：从用户填的地址里取，不去读宿主的 config.json。 */
+  function upstreamPort(): number | null {
+    return portOf(cfg.upstreamUrl);
+  }
+
+  /** 起画布之前先敲一下宿主：连不上就不起，免得画布起来后一直连不上。 */
+  async function probeUpstream(url: string): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1500);
       try {
-        const raw = JSON.parse(readFileSync(configFile, "utf8"));
-        const found = Math.floor(Number(raw?.web?.port));
-        if (Number.isInteger(found) && found > 0 && found <= 65535 && found !== port) return { root: base, port: found };
-      } catch { /* 读不动就换下一个候选 */ }
-    }
-    return null;
+        await fetch(`${url}/api/status`, { signal: controller.signal, headers: { accept: "application/json" } });
+        // 拿到响应就算宿主在：401/404 也是「有人在答」，只有连不上才是没在。
+        return true;
+      } finally { clearTimeout(timer); }
+    } catch { return false; }
   }
 
   function locateScript(): string {
@@ -188,13 +214,13 @@ export async function apply(ctx: Context) {
 
   async function state() {
     const pid = await canvasPid();
-    const upstream = locateUpstream(cfg.port);
     return {
       running: !!pid,
       pid,
       owned: pid ? await isOurs(pid) : false,
       port: cfg.port,
-      upstreamPort: upstream?.port ?? null,
+      upstreamUrl: cfg.upstreamUrl,
+      upstreamPort: upstreamPort(),
       script: locateScript(),
       stopWithSpace: cfg.stopWithSpace,
       error: canvasError ?? null,
@@ -216,11 +242,18 @@ export async function apply(ctx: Context) {
     const script = locateScript();
     if (!script) { canvasError = "找不到画布脚本：插件目录里没有 " + scriptName + "，也没在设置里指定路径。"; return canvasError; }
     if (!existsSync(script)) { canvasError = `找不到脚本：${script}`; return canvasError; }
-    const upstream = locateUpstream(cfg.port);
-    if (!upstream) { canvasError = "读不到宿主端口：没找到带 web.port 的 config/config.json。画布不起来，免得连到别的实例上。"; return canvasError; }
+    const upstream = upstreamPort();
+    if (!cfg.upstreamUrl || upstream === null) {
+      canvasError = "还没设宿主地址：在下面的设置里填这台宿主的地址（例如 http://127.0.0.1:9270）再启动。地址没配就不起画布，免得连到别的实例上。";
+      return canvasError;
+    }
+    if (!(await probeUpstream(cfg.upstreamUrl))) {
+      canvasError = `连不上宿主：${cfg.upstreamUrl}。确认宿主在跑、地址和端口没填错，改完再启动。`;
+      return canvasError;
+    }
     try {
       // --parent-pid 给脚本自己兜底：宿主被硬杀时插件来不及收尾，画布发现自己成了孤儿就退出。
-      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream", String(upstream.port), "--owner", cfg.ownerToken, "--parent-pid", String(process.ppid)],
+      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream", String(upstream), "--owner", cfg.ownerToken, "--parent-pid", String(process.ppid)],
         { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
       child.unref();
       canvasChild = child;
@@ -237,7 +270,7 @@ export async function apply(ctx: Context) {
     for (let i = 0; i < 24; i += 1) {
       await new Promise((done) => setTimeout(done, 250));
       const pid = await canvasPid();
-      if (pid) { canvasError = undefined; return `画布起来了（PID ${pid}，端口 ${cfg.port}，连宿主 ${upstream.port}）。`; }
+      if (pid) { canvasError = undefined; return `画布起来了（PID ${pid}，端口 ${cfg.port}，连宿主 ${upstream}）。`; }
     }
     canvasError = "脚本已经拉起，但 6 秒内没等到端口，去看一下脚本自己有没有报错。";
     return canvasError;
@@ -309,7 +342,7 @@ export async function apply(ctx: Context) {
     return html("思维画布", `${note ? `<p class="notice">${escape(note)}</p>` : ""}
 <section class="panel">
   <h2>状态</h2>
-  <p><span class="badge${current.running ? "" : " warn"}">${current.running ? `运行中 · PID ${current.pid}` : "没在跑"}</span><span class="badge">端口 ${current.port}</span><span class="badge">连宿主 ${current.upstreamPort ?? "没读到"}</span>${current.running ? `<span class="badge${current.owned ? "" : " warn"}">${current.owned ? "本实例启动" : "别的实例/外部进程"}</span>` : ""}</p>
+  <p><span class="badge${current.running ? "" : " warn"}">${current.running ? `运行中 · PID ${current.pid}` : "没在跑"}</span><span class="badge">端口 ${current.port}</span><span class="badge">连宿主 ${current.upstreamUrl || "没设"}</span>${current.running ? `<span class="badge${current.owned ? "" : " warn"}">${current.owned ? "本实例启动" : "别的实例/外部进程"}</span>` : ""}</p>
   <p class="muted">画布是独立的 node 脚本，开机不会自己起来。要用的时候点启动，不用了点停止。${current.error ? `上次出错：${escape(current.error)}` : ""}</p>
   <p class="muted">脚本：<code>${escape(current.script || "（没找到）")}</code></p>
   <p>
@@ -325,6 +358,10 @@ export async function apply(ctx: Context) {
     <input type="number" name="port" min="1024" max="65535" value="${current.port}">
     <p class="muted" style="margin-top:6px">默认 9281。不能和宿主端口相同，改完要重启画布才生效。</p>
 
+    <div class="field">宿主地址</div>
+    <input type="text" name="upstreamUrl" id="upstreamUrl" value="${escape(cfg.upstreamUrl)}" placeholder="http://127.0.0.1:9270">
+    <p class="muted" style="margin-top:6px">画布连回哪个宿主，写成 http://主机:端口。第一次打开这个页面会自动填上当前地址，确认一下再保存；改了这里画布要重启才生效。</p>
+
     <div class="field">画布脚本路径</div>
     <input type="text" name="canvasScript" value="${escape(cfg.canvasScript)}">
     <p class="muted" style="margin-top:6px">留空就用插件目录里的 ${scriptName}。只有想换成别处的副本时才填。</p>
@@ -334,6 +371,7 @@ export async function apply(ctx: Context) {
 
     <p style="margin-top:16px"><button class="primary" type="submit">保存设置</button></p>
   </form>
+  <script>(function(){var i=document.getElementById("upstreamUrl");if(i&&!i.value)i.value=location.origin;})();</script>
 </section>`);
   }
 
@@ -373,7 +411,15 @@ export async function apply(ctx: Context) {
       const nextPort = Number.isInteger(rawPort) && rawPort >= 1024 && rawPort <= 65535 ? rawPort : cfg.port;
       const script = String(form.get("canvasScript") ?? "").trim().slice(0, 500);
       const stopWithSpace = form.get("stopWithSpace") === "on";
-      cfg = { port: nextPort, canvasScript: script, stopWithSpace, ownerToken: cfg.ownerToken };
+      const rawUrl = String(form.get("upstreamUrl") ?? "").trim();
+      const nextUrl = normalizeUrl(rawUrl);
+      if (rawUrl && !nextUrl) {
+        note = "宿主地址要写成 http://主机:端口 的形式，这次没存。";
+        res.writeHead(303, { Location: pagePath + "?note=" + encodeURIComponent(note) });
+        res.end();
+        return;
+      }
+      cfg = { port: nextPort, canvasScript: script, stopWithSpace, ownerToken: cfg.ownerToken, upstreamUrl: nextUrl };
       await ctx.config.save("config.json", cfg);
       note = "设置存下了。端口改动要重启画布才生效。";
     } catch (error) {
@@ -383,5 +429,5 @@ export async function apply(ctx: Context) {
     res.end();
   });
 
-  ctx.logger.info(`思维画布：端口 ${cfg.port}，随思维空间停止 ${cfg.stopWithSpace ? "开" : "关"}`);
+  ctx.logger.info(`思维画布：端口 ${cfg.port}，连宿主 ${cfg.upstreamUrl || "（没设）"}，随思维空间停止 ${cfg.stopWithSpace ? "开" : "关"}`);
 }

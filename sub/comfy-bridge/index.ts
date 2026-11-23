@@ -42,9 +42,14 @@ declare module "whalelife" {
 const here = dirname(fileURLToPath(import.meta.url));
 // plugins/thinking-space/sub/comfy-bridge → 回到 plugins，再进兄弟目录 comfy。
 // 不写盘符：包发到谁的机器上都能用。
-const comfyDir = join(here, "..", "..", "..", "comfy");
-const workflowsDir = join(comfyDir, "workflows");
-const canvasFlowsDir = join(comfyDir, "canvas-flows");
+// 不再猜生图插件的目录：需要什么，问它自己公开的服务（comfy.assets）。
+// 它还没提供这个服务时，这里降级：手动导入仍可用，只是列不出工作流。
+type ComfyAssets = {
+  listWorkflows(): { name: string; size: number; mtime: string }[];
+  listFlows(): { slug: string; size: number; mtime: string; text: string }[];
+  saveFlow(name: string, text: string): { slug: string };
+  deleteFlow(slug: string): boolean;
+};
 // 父插件的 data：画布自己 POST 上来的工程快照就在这儿，只读，用来判断「这条包导没导进画布」。
 const spaceDataDir = join(here, "..", "..", "data");
 
@@ -145,7 +150,16 @@ details summary{cursor:pointer;font-size:12.5px;opacity:.8}
 }
 
 export async function apply(ctx: Context) {
-  const installed = () => existsSync(join(comfyDir, "plugin.yaml"));
+  /** 生图插件在不在：认它公开的服务，不认它的目录。 */
+  const assetsOf = (): ComfyAssets | null => {
+    try {
+      const service: any = ctx.get("comfy.assets", false);
+      return service && typeof service.listFlows === "function" && typeof service.listWorkflows === "function"
+        ? service as ComfyAssets
+        : null;
+    } catch { return null; }
+  };
+  const installed = () => !!assetsOf();
   const toolReady = () => ctx.tools.list().some((tool: any) => tool.function?.name === "comfy_generate");
 
   async function readSettings(): Promise<Settings> {
@@ -218,19 +232,16 @@ export async function apply(ctx: Context) {
     await ctx.config.save(importsFile, { imports });
   }
 
-  /** 读目录时坏掉一个文件不该让整页翻白，跳过那一个就行。 */
+  /** 工作流清单由生图插件给：这边只读它公开的服务，不碰它的目录。 */
   function readWorkflows(): Workflow[] {
-    if (!existsSync(workflowsDir)) return [];
-    const out: Workflow[] = [];
-    for (const entry of readdirSync(workflowsDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".json")) continue;
-      try {
-        const info = statSync(join(workflowsDir, entry.name));
-        out.push({ name: entry.name, size: info.size, mtime: info.mtime.toISOString() });
-      } catch { /* 这个文件读不到就算了，别的照列 */ }
-    }
-    out.sort((a, b) => a.name.localeCompare(b.name));
-    return out;
+    const service = assetsOf();
+    if (!service) return [];
+    try {
+      return service.listWorkflows()
+        .filter((item) => item && typeof item.name === "string")
+        .map((item) => ({ name: item.name, size: Number(item.size ?? 0), mtime: String(item.mtime ?? "") }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch { return []; }
   }
 
   /** 画布工程快照里已经有的流程 id。读不到就当一条都没有，不影响别的。 */
@@ -268,13 +279,14 @@ export async function apply(ctx: Context) {
 
   /** 把包摊开：几个节点、用什么工具、提示词写什么、要哪个工作流。 */
   function readCanvasFlows(workflowNames: Set<string>, registered: Set<string>, imports: Imports): CanvasFlow[] {
-    if (!existsSync(canvasFlowsDir)) return [];
+    const service = assetsOf();
+    if (!service) return [];
+    let list: { slug: string; size: number; mtime: string; text: string }[] = [];
+    try { list = service.listFlows(); } catch { return []; }
     const out: CanvasFlow[] = [];
-    for (const entry of readdirSync(canvasFlowsDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".json")) continue;
-      const full = join(canvasFlowsDir, entry.name);
+    for (const entry of list) {
       try {
-        const bundle = JSON.parse(readFileSync(full, "utf-8"));
+        const bundle = JSON.parse(entry.text);
         const problems = inspectBundle(bundle);
         const flow = bundle?.flows?.[0] ?? {};
         const nodes: Node[] = (Array.isArray(flow.nodes) ? flow.nodes : []).map((node: any) => ({
@@ -286,14 +298,13 @@ export async function apply(ctx: Context) {
         const tools = [...new Set(nodes.map((n) => n.type).filter(Boolean))];
         const prompts = nodes.map((n) => n.prompt).filter(Boolean);
         const workflowFiles = [...new Set(nodes.map((n) => n.workflow).filter(Boolean))];
-        const info = statSync(full);
-        const slug = entry.name.replace(/\.json$/i, "");
+        const slug = entry.slug;
         const origin = imports[slug];
         out.push({
           slug,
           name: typeof flow?.name === "string" && flow.name ? flow.name : slug,
-          size: info.size,
-          mtime: info.mtime.toISOString(),
+          size: entry.size,
+          mtime: entry.mtime,
           flowId: typeof flow?.id === "string" ? flow.id : "",
           nodes,
           tools,
@@ -317,14 +328,14 @@ export async function apply(ctx: Context) {
     const imports = await readImports();
     const has = installed();
     const ready = toolReady();
-    const workflows = has ? readWorkflows() : [];
+    const workflows = readWorkflows();
     const workflowNames = new Set(workflows.map((w) => w.name));
-    const allFlows = has ? readCanvasFlows(workflowNames, registeredFlowIds(), imports) : [];
+    const allFlows = readCanvasFlows(workflowNames, registeredFlowIds(), imports);
     const flows = settings.strict ? allFlows.filter((flow) => !flow.problems.length) : allFlows;
     const rejected = allFlows.length - flows.length;
     const broken = flows.filter((flow) => flow.missingWorkflows.length);
     const note = !has
-      ? "没装《生图》插件（comfy）。装上之后这里才列得出工作流，出图本身也走它。"
+      ? "没装《生图》插件（comfy），或者它这个版本还没提供 comfy.assets 服务——当前版本不支持自动列出工作流。手动导入功能包和出图照常，装上/升级生图插件后这里才列得出工作流。"
       : !ready
         ? "《生图》插件在，但 comfy_generate 还没注册上——多半是它自己没加载成功，去控制台看它的报错。"
         : workflows.length ? "" : "《生图》插件在，但 workflows 目录里没有 .json 工作流。去 ComfyUI 里点「存到 WhaleLife」导出一份。";
@@ -332,8 +343,8 @@ export async function apply(ctx: Context) {
       ok: has && ready,
       installed: has,
       toolReady: ready,
-      dir: workflowsDir,
-      flowsDir: canvasFlowsDir,
+      dir: has ? "comfy.assets（生图插件提供）" : "",
+      flowsDir: has ? "comfy.assets（生图插件提供）" : "",
       workflows,
       flows,
       rejected,
@@ -564,23 +575,28 @@ export async function apply(ctx: Context) {
   ctx.web.api(deletePath, async (req: any, res: any) => {
     const { form } = await body(req);
     const slug = String(form.get("slug") ?? "");
-    const base = resolve(canvasFlowsDir);
-    const target = resolve(base, slug + ".json");
-    if (!slug || !target.startsWith(base + "\\") || !/\.json$/i.test(target)) {
+    const service = assetsOf();
+    if (!service) {
+      res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("生图插件还没提供删除接口（comfy.assets），现在删不了。");
+      return;
+    }
+    if (!slug || !/^[A-Za-z0-9_\u4e00-\u9fa5-]{1,80}$/.test(slug)) {
       res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
-      res.end("拒绝：只删 canvas-flows 目录里的 .json");
+      res.end("拒绝：功能包名不合法");
       return;
     }
-    if (!existsSync(target)) {
-      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-      res.end("没有这个功能包：" + slug);
-      return;
-    }
+    let removed = false;
     try {
-      unlinkSync(target);
+      removed = service.deleteFlow(slug);
     } catch (error) {
       res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("删除失败：" + String(error));
+      return;
+    }
+    if (!removed) {
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("没有这个功能包：" + slug);
       return;
     }
     // 来源登记跟着走：包没了，别留一条指向空气的账。
@@ -690,8 +706,9 @@ export async function apply(ctx: Context) {
       }
     }
     try {
-      mkdirSync(canvasFlowsDir, { recursive: true });
-      writeFileSync(join(canvasFlowsDir, slug + ".json"), JSON.stringify(bundle, null, 2), { encoding: "utf-8" });
+      const service = assetsOf();
+      if (!service) throw new Error("生图插件还没提供 comfy.assets 服务，现在收不了包");
+      service.saveFlow(slug, JSON.stringify(bundle, null, 2));
     } catch (error) {
       jsonReply(res, 500, { ok: false, error: "写文件失败：" + String(error) });
       return;
@@ -705,7 +722,7 @@ export async function apply(ctx: Context) {
     jsonReply(res, 200, {
       ok: true,
       slug,
-      file: join(canvasFlowsDir, slug + ".json"),
+      file: slug + ".json",
       flowId: String(flow?.id ?? ""),
       provider: providerId,
       note: "已落成画布功能包。去画布点「注册功能」选它，或者下一次刷新页面就列在这里。",
@@ -719,7 +736,7 @@ export async function apply(ctx: Context) {
     res.end(JSON.stringify({
       ok: true,
       name: "思维画布桥",
-      version: "0.3.0",
+      version: "0.4.0",
       endpoints: {
         list: { method: "GET", path: flowsPath, note: "列出当前可导入的功能包" },
         registerProvider: {
@@ -770,5 +787,5 @@ export async function apply(ctx: Context) {
     res.end(JSON.stringify({ ok: current.installed, count: current.flows.length, flows: current.flows, note: current.note }));
   });
 
-  ctx.logger.info(`思维画布桥：工作流目录 ${workflowsDir}，功能包目录 ${canvasFlowsDir}`);
+  ctx.logger.info(`思维画布桥：工作流和功能包都走生图插件公开的 comfy.assets 服务`);
 }

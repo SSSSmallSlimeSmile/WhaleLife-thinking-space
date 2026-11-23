@@ -256,9 +256,10 @@ export async function apply(ctx: Context) {
           const raw: any = await ctx.tools.call("space_run", {
             id: shell.skillId,
             params,
-            // 壳的危险等级已经让宿主问过用户了，这里才放行副作用。
-            // safe 技能没有副作用步骤，传 false 也不会被拦。
-            confirmSideEffects: shell.danger !== "safe",
+            // 只在「用户已经明确授权这次执行」时才放行副作用步骤：宿主权限是 full
+            // （用户在配置里显式授权）才算确认过。壳自己的危险等级只决定「要不要问」，
+            // 不能拿它代替用户的确认——否则含写文件/发消息步骤的技能等于被壳自动批准。
+            confirmSideEffects: session?.permission === "full",
             via: "self",
           }, {
             // 透传调用者的权限，不写死。
