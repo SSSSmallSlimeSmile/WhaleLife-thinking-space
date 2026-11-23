@@ -21,7 +21,7 @@
 每个壳对应一条技能。工具被调用时：
 
 1. 用调用者的权限（`session.permission`）去调 `space_run`，不写死
-2. `confirmSideEffects` 只在调用者权限是 `full`（用户在配置里显式授权）时才传 `true`。危险等级只决定「要不要问」，不能代替用户的确认——否则带写文件 / 发消息步骤的技能等于被壳自动批准
+2. 危险等级只决定「要不要问」。放行条件是**用户对这一次执行明确确认过**：壳去问宿主审批接口（`ctx.approval.request()`），拿到 `approved` 才把 `confirmSideEffects` 传 `true`。拿不到确认就不跑，回 `needs_confirmation` 并附上宿主给的原因，指路到能确认的入口——壳不替用户点头，也不把「配置里给了 full 权限」当成「这次同意」
 3. 把 `space_run` 的回执原样转述，包括 `staleDefinition`（技能在运行期间被改过）
 
 危险等级**从技能自己声明的步骤推导**，页面加壳时直接读 `space_skills` 返回的 `danger`，壳不能自己填。

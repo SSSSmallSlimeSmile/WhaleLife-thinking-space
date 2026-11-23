@@ -12,6 +12,16 @@ const upstream = Number(argOf('--upstream') || process.env.WORKBENCH_WHALE_PORT 
 if (![port, upstream].every(value => Number.isInteger(value) && value > 0 && value <= 65535) || port === upstream) {
   throw new Error('请选择两个不同的有效端口。');
 }
+// 宿主挂在子路径下时（例如 http://127.0.0.1:9272/review-prefix），转发必须带上这段前缀，
+// 否则页面里的 /plugins/... 会被投到根上，直接 404。
+const upstreamPath = (argOf('--upstream-path') || process.env.WORKBENCH_WHALE_PATH || '').replace(/\/+$/, '');
+if (upstreamPath && !/^\/[A-Za-z0-9._~\-/]*$/.test(upstreamPath)) throw new Error('--upstream-path 不合法：' + upstreamPath);
+const upPath = (u) => {
+  const raw = typeof u === 'string' && u ? u : '/';
+  const tail = raw.startsWith('/') ? raw : '/' + raw;
+  if (!upstreamPath || tail === upstreamPath || tail.startsWith(upstreamPath + '/')) return tail;
+  return upstreamPath + tail;
+};
 const host = '127.0.0.1';
 const origin = `http://${host}:${port}`;
 const targetOrigin = `http://${host}:${upstream}`;
@@ -54,7 +64,7 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET' && (req.url.startsWith('/market/') || req.url.startsWith('/plugins/thinking-space/'))) {
     if (!allowed(req)) { res.writeHead(403).end(); return; }
-    const request = http.request({hostname:host,port:upstream,path:req.url,method:'GET',headers:headers(req)}, response => {
+    const request = http.request({hostname:host,port:upstream,path:upPath(req.url),method:'GET',headers:headers(req)}, response => {
       res.writeHead(response.statusCode, response.headers);
       response.pipe(res);
     });
@@ -69,7 +79,7 @@ const server = http.createServer((req, res) => {
   const route=req.method+' '+req.url.split('?')[0];
   if (!allowedRoutes.has(route)) { res.writeHead(404).end(); return; }
   const isIdentity=route===identityRoute;
-  const request = http.request({hostname:host,port:upstream,path:isIdentity?'/api/status':req.url,method:req.method,headers:headers(req)}, async response => {
+  const request = http.request({hostname:host,port:upstream,path:isIdentity?upPath('/api/status'):upPath(req.url),method:req.method,headers:headers(req)}, async response => {
     if(isIdentity){
       const send=(status,data)=>res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}).end(JSON.stringify(data));
       if(response.statusCode!==200){
@@ -105,7 +115,7 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
-  const request = http.request({hostname:host,port:upstream,path:req.url,method:'GET',headers:headers(req)});
+  const request = http.request({hostname:host,port:upstream,path:upPath(req.url),method:'GET',headers:headers(req)});
   request.on('upgrade', (response, remote, buffered) => {
     if (socket.destroyed) { remote.destroy(); return; }
     const lines = ['HTTP/1.1 101 Switching Protocols'];

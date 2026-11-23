@@ -71,6 +71,11 @@ function portOf(value: string): number | null {
   } catch { return null; }
 }
 
+/** 地址里的子路径。宿主挂在 /review-prefix 这种前缀下时，转发必须带上它。 */
+function pathOf(value: string): string {
+  try { return new URL(value).pathname.replace(/\/+$/, ""); } catch { return ""; }
+}
+
 function escape(value: unknown) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -253,7 +258,7 @@ export async function apply(ctx: Context) {
     }
     try {
       // --parent-pid 给脚本自己兜底：宿主被硬杀时插件来不及收尾，画布发现自己成了孤儿就退出。
-      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream", String(upstream), "--owner", cfg.ownerToken, "--parent-pid", String(process.ppid)],
+      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream", String(upstream), "--upstream-path", pathOf(cfg.upstreamUrl), "--owner", cfg.ownerToken, "--parent-pid", String(process.ppid)],
         { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
       child.unref();
       canvasChild = child;

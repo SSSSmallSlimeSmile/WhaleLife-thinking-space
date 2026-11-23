@@ -256,16 +256,37 @@ export async function apply(ctx: Context) {
         const started = Date.now();
         const params = pickParams(args, skillIndex.get(shell.skillId)?.params ?? []);
         try {
+          // 危险等级只决定「要不要问」。放行条件是：用户对这一次执行明确确认过。
+          // 拿不到确认就不跑，指路到能确认的入口——壳不替用户点头。
+          let confirmed = false;
+          if (shell.danger !== "safe") {
+            const verdict: any = await Promise.resolve()
+              .then(() => ctx.approval?.request())
+              .catch(() => ({ approved: false }));
+            confirmed = verdict?.approved === true;
+            if (!confirmed) {
+              const why =
+                typeof verdict?.reason === "string" && verdict.reason
+                  ? "（宿主：" + verdict.reason + "）"
+                  : "";
+              return {
+                status: "needs_confirmation",
+                skill: shell.skillId,
+                note:
+                  "这条技能含副作用步骤，要先对本次执行明确确认。" +
+                  why +
+                  "当前入口拿不到确认，请在能确认的地方再跑一次（例如在聊天里直接让助手执行这条技能，由宿主来问）。",
+                took: Date.now() - started,
+              };
+            }
+          }
           const raw: any = await ctx.tools.call("space_run", {
             id: shell.skillId,
             params,
-            // 只在「用户已经明确授权这次执行」时才放行副作用步骤：宿主权限是 full
-            // （用户在配置里显式授权）才算确认过。壳自己的危险等级只决定「要不要问」，
-            // 不能拿它代替用户的确认——否则含写文件/发消息步骤的技能等于被壳自动批准。
-            confirmSideEffects: session?.permission === "full",
+            confirmSideEffects: confirmed,
             via: "self",
           }, {
-            // 透传调用者的权限，不写死。
+            // 透传调用者的权限，不写死；放不放行由上一步的确认单独决定。
             permission: session?.permission,
             signal: session?.signal,
             origin: { plugin: "thinking-space/shells", action: shell.skillId },

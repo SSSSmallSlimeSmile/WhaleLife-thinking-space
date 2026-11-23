@@ -43,8 +43,11 @@ plugins/
 | `saveFlow(name, bundle)` | 写一个功能包，返回落盘路径 |
 | `deleteFlow(slug)` | 删一个功能包，返回是否真删了 |
 
-本插件用 `optionalDepends: [comfy]` + `ctx.optional("comfy.assets", …)` 订阅：服务上线下线都能感知，
-页面刷新时重新取一次。拿不到服务，所有读写能力一起降级——**不假装能用**。
+本插件用 `optionalDepends: [comfy.assets]` + `ctx.optional("comfy.assets", …)` 订阅：服务上线下线都能感知，
+页面刷新时重新取一次。清单里写的就是实际服务名，不用 `ctx.get(name, false)`——后者一旦取到值就会把
+`comfy.assets` 记成本插件的必需依赖，提供方一停用，桥跟着 `blocked`，原先 200 的列表变 404。
+
+拿不到服务时只降级「自动列出工作流」这一块：提示当前版本不支持，**手动导入照常可用**。
 
 ---
 

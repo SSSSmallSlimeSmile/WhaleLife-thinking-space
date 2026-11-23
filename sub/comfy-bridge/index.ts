@@ -151,15 +151,24 @@ details summary{cursor:pointer;font-size:12.5px;opacity:.8}
 }
 
 export async function apply(ctx: Context) {
-  /** 生图插件在不在：认它公开的服务，不认它的目录。 */
-  const assetsOf = (): ComfyAssets | null => {
-    try {
-      const service: any = ctx.get("comfy.assets", false);
-      return service && typeof service.listFlows === "function" && typeof service.listWorkflows === "function"
-        ? service as ComfyAssets
-        : null;
-    } catch { return null; }
-  };
+  /**
+   * 生图插件在不在：认它公开的服务（comfy.assets），不认它的目录。
+   *
+   * 必须走 ctx.optional，不能 ctx.get(name, false)：后者只要取到值，就会把
+   * comfy.assets 记进本插件的必需依赖；提供方一停用，这里跟着 blocked，
+   * 连手动导入的路由也一起 404。optional 只观察，不建依赖边。
+   */
+  let assets: ComfyAssets | null = null;
+  const assetsOf = (): ComfyAssets | null =>
+    assets && typeof assets.listFlows === "function" && typeof assets.listWorkflows === "function"
+      ? assets
+      : null;
+  ctx.optional<ComfyAssets>("comfy.assets", (binding) => {
+    const service: any = binding?.service ?? null;
+    assets = service && typeof service.listFlows === "function" && typeof service.listWorkflows === "function"
+      ? service as ComfyAssets
+      : null;
+  });
   const installed = () => !!assetsOf();
   const toolReady = () => ctx.tools.list().some((tool: any) => tool.function?.name === "comfy_generate");
 
@@ -233,6 +242,38 @@ export async function apply(ctx: Context) {
     await ctx.config.save(importsFile, { imports });
   }
 
+  /**
+   * 别的软件推过来的功能包放在本插件自己的目录里，不写生图插件那边。
+   * 导入是桥的事，不是 comfy 的事——提供方停用时手动导入也要照常可用。
+   */
+  const importedDir = join(here, "data", "imported");
+  function readImported(): { slug: string; size: number; mtime: string; text: string }[] {
+    const out: { slug: string; size: number; mtime: string; text: string }[] = [];
+    let names: string[] = [];
+    try { names = readdirSync(importedDir); } catch { return out; }
+    for (const entry of names) {
+      if (!entry.toLowerCase().endsWith(".json")) continue;
+      try {
+        const info = statSync(join(importedDir, entry));
+        if (!info.isFile()) continue;
+        out.push({
+          slug: entry.slice(0, -5),
+          size: info.size,
+          mtime: info.mtime.toISOString(),
+          text: readFileSync(join(importedDir, entry), "utf-8"),
+        });
+      } catch { /* 读不到就跳过 */ }
+    }
+    return out;
+  }
+  function writeImported(slug: string, text: string) {
+    mkdirSync(importedDir, { recursive: true });
+    writeFileSync(join(importedDir, slug + ".json"), text, "utf-8");
+  }
+  function deleteImported(slug: string): boolean {
+    try { unlinkSync(join(importedDir, slug + ".json")); return true; } catch { return false; }
+  }
+
   /** 工作流清单由生图插件给：这边只读它公开的服务，不碰它的目录。 */
   function readWorkflows(): Workflow[] {
     const service = assetsOf();
@@ -280,10 +321,19 @@ export async function apply(ctx: Context) {
 
   /** 把包摊开：几个节点、用什么工具、提示词写什么、要哪个工作流。 */
   function readCanvasFlows(workflowNames: Set<string>, registered: Set<string>, imports: Imports): CanvasFlow[] {
+    // 两处来源：生图插件那边（ComfyUI 导出的）和本插件自己收的（别的软件推来的）。
+    // 提供方停用时，后者仍然列得出来——手动导入不依赖 comfy。
+    const list: { slug: string; size: number; mtime: string; text: string }[] = [...readImported()];
     const service = assetsOf();
-    if (!service) return [];
-    let list: { slug: string; size: number; mtime: string; text: string }[] = [];
-    try { list = service.listFlows(); } catch { return []; }
+    if (service) {
+      try {
+        const raw: any = service.listFlows();
+        // 跨进程拿回来的可能是镜像对象而不是真数组；不是数组就当没有。
+        for (const entry of Array.isArray(raw) ? raw : []) {
+          if (!list.some((item) => item.slug === entry.slug)) list.push(entry);
+        }
+      } catch { /* 提供方刚断开，按没有处理 */ }
+    }
     const out: CanvasFlow[] = [];
     for (const entry of list) {
       try {
@@ -577,19 +627,15 @@ export async function apply(ctx: Context) {
     const { form } = await body(req);
     const slug = String(form.get("slug") ?? "");
     const service = assetsOf();
-    if (!service) {
-      res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8" });
-      res.end("生图插件还没提供删除接口（comfy.assets），现在删不了。");
-      return;
-    }
     if (!slug || !/^[A-Za-z0-9_\u4e00-\u9fa5-]{1,80}$/.test(slug)) {
       res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("拒绝：功能包名不合法");
       return;
     }
-    let removed = false;
+    // 先删本插件自己收的，再问生图插件那边。
+    let removed = deleteImported(slug);
     try {
-      removed = service.deleteFlow(slug);
+      if (!removed && service) removed = service.deleteFlow(slug);
     } catch (error) {
       res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("删除失败：" + String(error));
@@ -707,9 +753,9 @@ export async function apply(ctx: Context) {
       }
     }
     try {
-      const service = assetsOf();
-      if (!service) throw new Error("生图插件还没提供 comfy.assets 服务，现在收不了包");
-      service.saveFlow(slug, JSON.stringify(bundle, null, 2));
+      // 落盘到本插件自己的目录：别的软件的包不写进生图插件，
+      // 提供方停用时也要能导进来。
+      writeImported(slug, JSON.stringify(bundle, null, 2));
     } catch (error) {
       jsonReply(res, 500, { ok: false, error: "写文件失败：" + String(error) });
       return;
