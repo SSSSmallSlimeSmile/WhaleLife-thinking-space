@@ -56,7 +56,7 @@ check("脚本里没有反引号（不会被模板字符串吃掉）", !script.in
 
 // —— 一个能把 fetch 按场景换掉的沙盒 ——
 function sandbox(config) {
-  const calls = { reload: 0, rollback: 0, verify: 0, publish: 0, status: 0 };
+  const calls = { reload: 0, rollback: 0, verify: 0, publish: 0, status: 0, pageReload: 0 };
   const appended = [];
   const report = { textContent: "", appendChild() {} };
   const bar = { textContent: "", appendChild(node) { appended.push(node); } };
@@ -81,6 +81,7 @@ function sandbox(config) {
       querySelectorAll: () => [],
     },
     fetch: fetchMock,
+    location: { reload: () => { calls.pageReload += 1; } },
     setTimeout: (fn) => { fn(); return 0; },
     console,
   };
