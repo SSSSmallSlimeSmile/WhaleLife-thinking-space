@@ -904,6 +904,13 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
     return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
   }
 
+  // 子插件 id 有两种写法：带父前缀（thinking-space/skill-x）和不带。统一按不带处理。
+  function normSubId(value: unknown) {
+    const text = String(value ?? "").trim();
+    const prefix = String(hooks.parentId ?? "") + "/";
+    return prefix && text.startsWith(prefix) ? text.slice(prefix.length) : text;
+  }
+
   // —— 验收 ——
   ctx.web.api(apiBase + "/verify", async (req: any, res: any) => {
     try {
@@ -911,7 +918,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
       const raw = await hooks.readBody(req, 8 * 1024).catch(() => "");
       const parsed = raw ? JSON.parse(raw) : {};
       const url = new URL(String(req.url ?? "/"), "http://local");
-      const subId = String(parsed?.subId ?? url.searchParams.get("subId") ?? "").trim();
+      const subId = normSubId(parsed?.subId ?? url.searchParams.get("subId"));
       const registry = readRegistry();
       const record = registry.items.find((item) => item.subId === subId);
       if (!record) return send(res, 404, { ok: false, error: "没有这个发布记录：" + subId });
@@ -935,7 +942,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
       if (String(req.method ?? "GET").toUpperCase() !== "POST") return send(res, 405, { ok: false, error: "只支持 POST。" });
       const raw = await hooks.readBody(req, 16 * 1024);
       const parsed = raw ? JSON.parse(raw) : {};
-      const subId = String(parsed?.subId ?? "").trim();
+      const subId = normSubId(parsed?.subId);
       const reason = String(parsed?.reason ?? "").slice(0, 200);
       const result = await serial(async () => {
         const registry = readRegistry();
@@ -981,16 +988,18 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
       if (String(req.method ?? "GET").toUpperCase() !== "POST") return send(res, 405, { ok: false, error: "只支持 POST。" });
       const raw = await hooks.readBody(req, 16 * 1024);
       const parsed = raw ? JSON.parse(raw) : {};
-      const subId = String(parsed?.subId ?? "").trim();
+      const subId = normSubId(parsed?.subId);
       const result = await serial(async () => {
         const registry = readRegistry();
         const record = registry.items.find((item) => item.subId === subId);
-        if (!record) return { ok: false, error: "没有这个发布记录：" + subId };
+        // 登记被清过、目录还在：这属于残留壳，允许就地清掉。
+        const hasDir = existsSync(join(subRoot, subId));
+        if (!record && !hasDir) return { ok: false, error: "没有这个发布记录，也没有这个目录：" + subId };
         const manifest = readFileSync(manifestFile, "utf8");
         writeFileSync(manifestFile, removeFromManifest(manifest, subId), "utf8");
         registry.items = registry.items.filter((item) => item.subId !== subId);
         writeRegistry(registry);
-        dropJob(record.publishId ?? "");
+        dropJob(record?.publishId ?? "");
         let removed = false;
         let note = "目录已删除。";
         try {
@@ -1055,12 +1064,24 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
           (record && record.stage === "written" && record.publishId ? ` <button data-resume="${hooks.escape(record.publishId)}">核对</button>` : "") +
           `</td></tr>`;
       };
+      const orphanShells: { skillId: string; subId: string }[] = [];
+      try {
+        for (const name of readdirSync(subRoot)) {
+          if (!name.startsWith("skill-")) continue;
+          const entry = join(subRoot, name, "index.ts");
+          if (!existsSync(entry)) continue;
+          const hit = /const SKILL_ID = (".*?");/.exec(readFileSync(entry, "utf8"));
+          if (!hit) continue;
+          const skillId = JSON.parse(hit[1]);
+          if (!published.has(skillId)) orphanShells.push({ skillId: skillId, subId: "thinking-space/" + name });
+        }
+      } catch {}
       const sectionOf = (kind: string, title: string) => {
         const group = skills.filter((skill) => skill.kind === kind);
         return `<section class="space-panel"><h3 style="margin:0 0 10px;font-size:14px">${title}（${group.length}）</h3>` +
           `<table style="width:100%;border-collapse:collapse;font-size:13px;text-align:left">` +
           `<thead><tr><th>技能</th><th>规模</th><th>已发布</th><th></th></tr></thead><tbody>` +
-          (group.map(rowOf).join("") || `<tr><td colspan="4">还没有。</td></tr>`) +
+          (group.map(rowOf).join("") || `<tr><td colspan="4" class="space-empty">还没有技能。</td></tr>`) +
           `</tbody></table></section>`;
       };
       const sections = sectionOf("single", "功能库") + sectionOf("composite", "复合功能库");
@@ -1068,6 +1089,11 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         "<li><code>" + hooks.escape(job.subId) + "</code> v" + hooks.escape(job.version) +
         " · " + hooks.escape(job.phase) +
         (job.note ? " · " + hooks.escape(job.note) : "") + "</li>").join("");
+      const orphanPanel = orphanShells.length === 0 ? "" :
+        '<section class="space-panel"><h3 style="margin:0 0 10px;font-size:14px">残留壳（' + orphanShells.length + '）</h3>' +
+        '<table style="width:100%;border-collapse:collapse;font-size:13px;text-align:left"><thead><tr><th>子插件</th><th>对应技能</th><th></th></tr></thead><tbody>' +
+        orphanShells.map((item) => '<tr><td><code>' + hooks.escape(item.subId) + '</code></td><td><code>' + hooks.escape(item.skillId) + '</code></td><td><button data-delete="' + hooks.escape(item.subId) + '">删除壳</button></td></tr>').join("") +
+        '</tbody></table><p class="space-lede">这些目录还在，但发布登记里没有它们——登记被清过就会这样。删掉能收回目录。</p></section>';
       const script = [
         "const report = document.getElementById(\"report\");",
         "function say(line) { report.textContent += line + String.fromCharCode(10); }",
@@ -1113,7 +1139,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         "  let last = \"还没核对\";",
         "  let anyStatus = false;",
         "  for (let i = 0; i < tries; i += 1) {",
-        "    const st = await probe(\"/api/status);",
+        "    const st = await probe(\"/api/status\");",
         "    if (st.kind === \"ok\") {",
         "      anyStatus = true;",
         "      const entry = pluginEntry(st.body, job.reloadId + \"/\" + job.subId);",
@@ -1144,7 +1170,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         "async function resume(publishId) {",
         "  const job = resumeJobs[publishId];",
         "  if (!job) { say(\"这条发布不在本页记录里，刷新页面再核对。\"); return; }",
-        "  const st = await probe(\"/api/status);",
+        "  const st = await probe(\"/api/status\");",
         "  if (st.kind === \"ok\" && !pendingHas(st.body, publishId)) { say(\"这条发布已经不是待确认状态（可能已回退或被别的发布顶掉），不再自动处理。\"); return; }",
         "  say(\"── 继续核对 \" + job.subId);",
         "  return await finish(job, { kind: \"unknown\" });",
@@ -1167,7 +1193,7 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         "}",
         "async function full(skillId) {",
         "  say(\"── 发布 \" + skillId);",
-        "  const beforeProbe = await probe(\"/api/status);",
+        "  const beforeProbe = await probe(\"/api/status\");",
         "  const pushed = await api(\"/plugins/thinking-space/shells/publish\", { skillId: skillId });",
         "  say(JSON.stringify(pushed));",
         "  if (!pushed.ok) return pushed;",
@@ -1188,7 +1214,6 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         "}));",
         "document.querySelectorAll(\"[data-resume]\").forEach((button) => button.addEventListener(\"click\", () => resume(button.dataset.resume)));",
         "window.__shells = { full: full, settle: settle, finish: finish, resume: resume, reloadParent: reloadParent, probe: probe, pendingHas: pendingHas, pluginEntry: pluginEntry };",
-        "[data-delete] 的点击处理",
         "document.querySelectorAll(\"[data-delete]\").forEach((button) => button.addEventListener(\"click\", async () => {",
         "  if (!confirm(\"删除这个壳？目录和登记都会消失，技能本身不动。\")) return;",
         "  const out = await api(\"/plugins/thinking-space/shells/delete\", { subId: button.dataset.delete });",
@@ -1196,14 +1221,14 @@ export function registerSkillPublish(ctx: Context, hooks: PublishHooks) {
         "  if (out.ok) await reloadParent(out.reloadId || \"thinking-space\");",
         "}));",
       ].join("\n");
-      const body = `<div class="space-wrap"><p class="space-muted">发布不是保存。保存技能只写技能库；发布才会生成子插件目录、改父清单，然后要重载一次才生效。` +
+      const body = `<div class="space-wrap"><p class="space-lede">发布不是保存。保存技能只写技能库；发布才会生成子插件目录、改父清单，然后要重载一次才生效。` +
         `重载由这一页来调——只有浏览器带着会话凭据，插件自己没这个权限。</p>` +
-        `<p class="space-muted">壳只从这一页发布：技能先存在下面的功能库或复合功能库里，再来生成壳。画布上的「发布到思维空间」发的是技能，不是壳。</p>` +
-        (pendingRows ? `<p class="space-muted">待确认的发布：</p><ul>` + pendingRows + `</ul>` : "") +
+        `<p class="space-lede">壳只从这一页发布：技能先存在下面的功能库或复合功能库里，再来生成壳。画布上的「发布到思维空间」发的是技能，不是壳。</p>` +
+        (pendingRows ? `<p class="space-lede">待确认的发布：</p><ul class="space-list">` + pendingRows + `</ul>` : "") +
         `<div id="resume" class="space-muted"></div>
-<p><button id="publish-all-verify">发布并验收（自动重载）</button></p>
+<p class="space-toolbar"><button id="publish-all-verify">发布并验收（自动重载）</button></p>
 ` +
-        sections + `
+        sections + orphanPanel + `
 <pre id="report"></pre>
 <script>
 ` + script + `</script></div>`;
