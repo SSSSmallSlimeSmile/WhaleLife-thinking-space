@@ -2662,4 +2662,29 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
     escape,
     html,
   });
+
+  /** 技能定义服务。壳（sub/shells）靠它拿参数声明来生成工具 schema。
+   *  走公开服务是作者的要求：不读别的插件的文件、不猜路径、不碰磁盘。
+   *  只给声明，不给执行能力——执行还是 space_run 的事。 */
+  ctx.provide("thinking-space.skills", {
+    describe: async () => {
+      const [store, catalog] = await Promise.all([readStore(), catalogByName()]);
+      return store.skills.map(skill => ({
+        id: skill.id,
+        name: skill.name,
+        description: skill.description,
+        kind: skill.kind,
+        danger: dangerFor(skill.steps, catalog, skill.danger),
+        revision: Number.isFinite(skill.revision) ? Number(skill.revision) : 0,
+        stepCount: skill.steps.length,
+        params: skill.params.map(param => ({
+          name: param.name,
+          type: param.type,
+          required: param.required === true,
+          label: param.label ?? null,
+          aliases: Array.isArray(param.aliases) ? param.aliases : [],
+        })),
+      }));
+    },
+  });
 }

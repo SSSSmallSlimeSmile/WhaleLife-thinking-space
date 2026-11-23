@@ -56,6 +56,27 @@ interface Store {
   items: Shell[];
 }
 
+/** 技能声明的参数。和父插件 Skill.params 一一对应，只取生成 schema 要用的字段。 */
+interface Param {
+  name: string;
+  type: string;
+  required: boolean;
+  label?: string | null;
+  aliases?: string[];
+}
+
+/** 从父插件拿到的一条技能声明。 */
+interface SkillInfo {
+  id: string;
+  name: string;
+  description: string;
+  kind: string;
+  danger: Danger;
+  revision: number;
+  stepCount: number;
+  params: Param[];
+}
+
 const EMPTY: Store = { schemaVersion: 1, items: [] };
 
 function escape(value: unknown) {
@@ -75,6 +96,38 @@ function uniqueName(want: string, taken: Set<string>) {
     if (!taken.has(candidate)) return candidate;
   }
   return want + "_" + Date.now().toString(36);
+}
+
+/** 技能参数类型 → JSON Schema 类型。父插件只认这六种，正好都是 JSON Schema 的合法类型。 */
+const JSON_TYPES = new Set(["string", "integer", "number", "boolean", "object", "array"]);
+
+/** 把技能声明的参数翻成工具 schema。 */
+function schemaFor(params: Param[]) {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const param of params) {
+    if (!param || typeof param.name !== "string" || !param.name) continue;
+    const type = JSON_TYPES.has(String(param.type)) ? String(param.type) : "string";
+    const node: Record<string, unknown> = { type };
+    if (typeof param.label === "string" && param.label.trim()) node.description = param.label.trim();
+    properties[param.name] = node;
+    if (param.required === true) required.push(param.name);
+  }
+  return { type: "object", properties, additionalProperties: false, ...(required.length ? { required } : {}) };
+}
+
+/** 只留技能声明过的参数（含别名），别把无关字段透过去。 */
+function pickParams(args: unknown, params: Param[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!args || typeof args !== "object" || Array.isArray(args)) return out;
+  const given = args as Record<string, unknown>;
+  for (const param of params) {
+    if (!param || typeof param.name !== "string") continue;
+    const keys = [param.name, ...(Array.isArray(param.aliases) ? param.aliases : [])];
+    const hit = keys.find(key => Object.hasOwn(given, key));
+    if (hit !== undefined) out[param.name] = given[hit];
+  }
+  return out;
 }
 
 function html(title: string, body: string) {
@@ -137,16 +190,54 @@ export async function apply(ctx: Context) {
     await ctx.config.save(storeFile, store);
   }
 
-  /** 问父插件要技能列表，走公开的工具接口，不碰磁盘。 */
-  async function fetchSkills(): Promise<{ ok: boolean; items: any[]; error?: string }> {
+  /** 已加载的技能声明，按 id 存。加壳时 refresh，注册时从这里取参数。 */
+  let skillIndex = new Map<string, SkillInfo>();
+
+  /** 问父插件要技能声明。
+   *  先走公开服务 thinking-space.skills（带参数声明，作者要求的做法）；
+   *  服务不在就退回 space_skills 工具（只有摘要，没参数——壳照旧能建，只是不带入参）。 */
+  async function fetchSkills(): Promise<{ ok: boolean; items: SkillInfo[]; via: "service" | "tool"; error?: string }> {
+    try {
+      const service: any = ctx.get("thinking-space.skills", false);
+      if (service && typeof service.describe === "function") {
+        const list = await service.describe();
+        const items = (Array.isArray(list) ? list : []).map((item: any) => ({
+          id: String(item?.id ?? ""),
+          name: String(item?.name ?? ""),
+          description: String(item?.description ?? ""),
+          kind: String(item?.kind ?? "single"),
+          danger: (item?.danger === "safe" || item?.danger === "full" ? item.danger : "ask") as Danger,
+          revision: Number(item?.revision ?? 0),
+          stepCount: Number(item?.stepCount ?? 0),
+          params: Array.isArray(item?.params) ? item.params : [],
+        })).filter((item: SkillInfo) => !!item.id);
+        return { ok: true, items, via: "service" };
+      }
+    } catch { /* 服务不在就退回工具，下面接着试 */ }
     try {
       const raw: any = await ctx.tools.call("space_skills", {}, { permission: "ask" } as any);
       const body = raw && raw.ok === true ? raw.result : null;
-      const items = Array.isArray(body?.skills) ? body.skills : [];
-      return { ok: true, items };
+      const items = (Array.isArray(body?.skills) ? body.skills : []).map((item: any) => ({
+        id: String(item?.id ?? ""),
+        name: String(item?.name ?? ""),
+        description: String(item?.description ?? ""),
+        kind: String(item?.kind ?? "single"),
+        danger: (item?.danger === "safe" || item?.danger === "full" ? item.danger : "ask") as Danger,
+        revision: Number(item?.revision ?? 0),
+        stepCount: Number(item?.stepCount ?? 0),
+        params: [],
+      })).filter((item: SkillInfo) => !!item.id);
+      return { ok: true, items, via: "tool" };
     } catch (error) {
-      return { ok: false, items: [], error: error instanceof Error ? error.message : String(error) };
+      return { ok: false, items: [], via: "tool", error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  /** 刷新技能索引。注册壳之前调一次，保证 schema 跟得上技能声明。 */
+  async function refreshSkills(): Promise<{ ok: boolean; via: "service" | "tool"; error?: string }> {
+    const { ok, items, via, error } = await fetchSkills();
+    if (ok) skillIndex = new Map(items.map(item => [item.id, item]));
+    return { ok, via, error };
   }
 
   /** 按一条记录注册工具。返回注销函数。 */
@@ -156,14 +247,15 @@ export async function apply(ctx: Context) {
       displayName: shell.label,
       danger: shell.danger,
       description: `跑思维空间技能「${shell.skillId}」。壳只转发：步骤、参数、失败原因都以技能本身为准，技能改了壳跟着变。` +
-        `危险等级 ${shell.danger} 来自技能自己声明的步骤，不由壳指定。`,
-      schema: { type: "object", properties: {}, additionalProperties: false },
-      async run(_args: unknown, session: ToolSession) {
+        `参数就是技能自己声明的那几个，必填/可选照技能的定义。危险等级 ${shell.danger} 来自技能自己声明的步骤，不由壳指定。`,
+      schema: schemaFor(skillIndex.get(shell.skillId)?.params ?? []),
+      async run(args: unknown, session: ToolSession) {
         const started = Date.now();
+        const params = pickParams(args, skillIndex.get(shell.skillId)?.params ?? []);
         try {
           const raw: any = await ctx.tools.call("space_run", {
             id: shell.skillId,
-            params: {},
+            params,
             // 壳的危险等级已经让宿主问过用户了，这里才放行副作用。
             // safe 技能没有副作用步骤，传 false 也不会被拦。
             confirmSideEffects: shell.danger !== "safe",
@@ -233,8 +325,10 @@ export async function apply(ctx: Context) {
     return true;
   }
 
-  // —— 启动：读记录、注册 ——
+  // —— 启动：读记录、刷技能声明、注册 ——
   store = await readStore();
+  const boot = await refreshSkills();
+  if (!boot.ok) lastNote = "读不到技能声明，壳先按无参数注册：" + (boot.error ?? "未知原因");
   syncRegistrations();
 
   // —— 页面 ——
@@ -321,7 +415,7 @@ ${notice}
       if (!skillId) return redirect(res, "没选技能。", "bad");
       if (store.items.some(item => item.skillId === skillId)) return redirect(res, "这条技能已经有壳了。", "bad");
 
-      // 校验技能真的存在，并拿它的危险等级。
+      // 校验技能真的存在，并拿它的危险等级和参数声明。
       const { ok, items, error } = await fetchSkills();
       if (!ok) return redirect(res, "读不到技能列表：" + (error ?? "未知原因"), "bad");
       const skill = items.find(item => String(item.id) === skillId);
@@ -338,10 +432,12 @@ ${notice}
         enabled: true,
         addedAt: new Date().toISOString(),
       };
+      skillIndex.set(skillId, skill);
       store.items.push(shell);
       await saveStore();
       syncRegistrations();
-      return redirect(res, `已加壳：工具 ${shell.toolName} 现在就出现在工具表里了。`, "ok");
+      const count = Array.isArray(skill.params) ? skill.params.length : 0;
+      return redirect(res, `已加壳：工具 ${shell.toolName} 现在就出现在工具表里了（带 ${count} 个参数）。`, "ok");
     } catch (error) {
       return redirect(res, "没加成：" + (error instanceof Error ? error.message : String(error)), "bad");
     }
