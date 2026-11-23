@@ -96,7 +96,9 @@ function escape(value: unknown) {
 /** 功能包落盘前的文件名净化：去掉路径分隔符，别的（含中文）都留着。 */
 function safeSlug(raw: string, fallback: string) {
   const cleaned = String(raw ?? "").trim().replace(/[\\/:*?"<>|]/g, "").replace(/\.\./g, "").slice(0, 60);
-  return cleaned || fallback;
+  // 只剩横线、下划线这种当不了文件名（编码坏掉时中文会变成 ? 被上面清干净）。
+  // 这种就退回 fallback，别造出 "-.json" 这种谁也认不出的东西。
+  return /[\p{L}\p{N}]/u.test(cleaned) ? cleaned : fallback;
 }
 
 function html(title: string, body: string) {
