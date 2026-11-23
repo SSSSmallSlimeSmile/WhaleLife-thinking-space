@@ -52,7 +52,7 @@ Release 里的包是 `.wlpkg.gz`（gzip + 首行清单 + 内容），普通解�
 用仓库根的 `install.mjs` 下载、校验、释放：
 
 ```bash
-node install.mjs --host "K:\WhaleLife\whalelife"
+node install.mjs --host "<宿主目录>"
 ```
 
 它做四件事：

@@ -129,8 +129,8 @@ if (process.env.WL_PUBLISH_FAULT === "exit-after-remove") process.exit(37);
 ## 五、复现命令
 
 ```powershell
-cd K:\Github\thinking-space-test
-$tsc = "K:\WhaleLifeUpstream\node_modules\typescript\bin\tsc"
+cd <插件仓库>
+$tsc = "<宿主目录>/node_modules/typescript/bin/tsc"
 node $tsc --noEmit -p .tmp\tscheck\tsconfig.check.json
 
 node test\publish.mjs        # 38/38

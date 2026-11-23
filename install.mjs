@@ -2,7 +2,7 @@
 // 一键安装 thinking-space：下载 Release 资产、校验、解压到宿主 plugins 目录。
 // 用法：
 //   node install.mjs                         在宿主目录里跑（自动找 ./plugins）
-//   node install.mjs --host "K:\WhaleLife\whalelife"
+//   node install.mjs --host "<宿主目录>"
 //   node install.mjs --file thinking-space-0.1.0.wlpkg.gz    用本地包，不联网
 //   node install.mjs --force                 覆盖已存在的插件目录
 
@@ -96,7 +96,7 @@ function findPluginsDir() {
   const root = path.resolve(host || process.cwd());
   const plugins = path.join(root, "plugins");
   if (!fs.existsSync(plugins)) {
-    die(`找不到 ${plugins}\n用 --host 指定宿主目录，例如：--host "K:\\WhaleLife\\whalelife"`);
+    die(`找不到 ${plugins}\n用 --host 指定宿主目录，例如：--host "<宿主目录>"`);
   }
   return plugins;
 }
