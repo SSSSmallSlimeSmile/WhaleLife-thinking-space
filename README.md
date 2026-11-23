@@ -58,7 +58,7 @@ node install.mjs --host "<宿主目录>"
 它做四件事：
 
 ```
-下载 thinking-space-0.2.5.wlpkg.gz
+下载 thinking-space-<版本>.wlpkg.gz（版本号见 plugin.yaml，<版本> 填当前值）
 逐文件比对 sha256（不一致就停，不写半个文件）
 释放到 <宿主>/plugins/thinking-space
 写 data/install.json 记录版本、来源、包摘要
@@ -89,6 +89,7 @@ plugins/thinking-space/
   install.mjs          一键安装脚本
   data/settings.example.json
   sub/canvas/          思维画布（子插件，独立的 node 进程）
+  sub/comfy-bridge/    思维画布桥（子插件，列工作流与功能包、给别的软件当中转）
   docs/                技术说明与实测数据
 ```
 
@@ -303,6 +304,12 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 画布上的流程点「发布到思维空间」会转成技能存进 `skills.json`（`POST /plugins/thinking-space/publish`）。技能只能引用上游某一步的**某个字段**，所以跨步骤连线要填字段路径（如 `data.text`），留空或写错宿主返回 422，原因原样显示、不保存。
 
+### 注册功能（把画布外的东西搬进来）
+
+工具栏「注册功能」把一个功能包做成流程：可以**选文件**（推荐），也可以粘 JSON。功能包就是画布的 `schemaVersion: 1` 导出物；不合格当场拒绝并逐条给原因，不留半条。
+
+一条容易踩的：输入节点（`input_text` 这类）连进某个参数位，发布的技能会**把那个参数提成可填**（`${prompt}`）；而节点里直接写死的值是固定值。想让技能每次换提示词，就别把提示词写死在出图节点里。
+
 ### 依赖
 
 - 需要 WhaleLife 宿主在跑（画布靠它取插件列表、市场目录、工具目录）
@@ -331,7 +338,39 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 
 ---
 
-## 十一、文档
+## 十一、思维画布桥（子插件）
+
+包里的子插件 `thinking-space/comfy-bridge`，页面名「思维画布桥」，随父插件一起装。
+
+它解决一个顺序问题：画布要能选「用哪个 ComfyUI 工作流」，但画布读不到生图插件的目录，生图插件也读不到画布的 `canvas-flows`。桥两边都读得到，于是当中间层。
+
+- 列 `plugins/comfy/workflows/` 下的工作流，和 `plugins/comfy/canvas-flows/` 下画布可直接导入的功能包
+- 包里 `workflow` 指向的文件不存在时标红，并写出缺哪个
+- 体检：生图插件在不在、`comfy_generate` 注册没、工作流/功能包数、缺工作流的包数、画布地址
+- 每个功能来源一块折叠区，默认收起；ComfyUI 是内置那一块
+
+**依赖写的是 `depends: [web]`，不是 `[comfy]`。** 宿主的 `depends` 认的是服务名，生图插件不 `provide` 任何服务，写 `[comfy]` 会永远 `blocked 等待依赖：comfy`。所以生图插件改成运行时探：没装时桥照常起来，只是列不出工作流，页面上写明要先装什么。
+
+**给别的软件当中转**（ComfyUI 扩展、Blender 脚本、随便什么能发 HTTP 的）：
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| GET | `/plugins/thinking-space/comfy-bridge/api` | 清单：端点、模板、校验规则 |
+| GET | `/plugins/thinking-space/comfy-bridge/flows` | 可导入的功能包列表 |
+| POST | `/plugins/thinking-space/comfy-bridge/providers` | 注册来源 `{id,name,description,fields}` |
+| POST | `/plugins/thinking-space/comfy-bridge/import` | 推功能包 `{provider,name,bundle}` |
+
+推上来的包**先过画布那套校验**，过不了直接 400 并逐条给原因，不落盘。同名直接覆盖——同一软件反复导出，要的是最新那份。
+
+**设置**：只列能通过校验的包（默认开）、默认工作流（只影响提示）、画布地址（默认 `http://127.0.0.1:9281`）。
+
+**删包**只认 `canvas-flows/*.json`，路径先 resolve 再前缀比对；删来源不删包。
+
+桥自己的说明、功能文件模板和注意事项见 [`sub/comfy-bridge/README.md`](sub/comfy-bridge/README.md)。
+
+---
+
+## 十二、文档
 
 - [`docs/使用-思维空间.md`](docs/使用-思维空间.md) —— 父插件怎么用：跑技能、写技能、发布、常见失败
 - [`docs/使用-思维画布.md`](docs/使用-思维画布.md) —— 子插件怎么用：启动、画流程、发布、四个标签
@@ -340,11 +379,12 @@ data/param-defaults.json  可选：给没写默认值的必填参数补一份，
 - [`docs/插件接入规范.md`](docs/插件接入规范.md) —— 建议上游加一个可选的输出端口声明，让插件市场的插件能无缝转进来
 - [`docs/待问清单.md`](docs/待问清单.md) —— 需要上游拍板的问题
 - [`docs/给上游的插件说明.md`](docs/给上游的插件说明.md) —— 十二节完整说明，含设计取舍
+- [`sub/comfy-bridge/README.md`](sub/comfy-bridge/README.md) —— 桥：接口清单、功能文件模板、字段规矩、注意事项
 - [`docs/HTTP接口.md`](docs/HTTP接口.md) —— 导入/运行接口的调用格式，`payload` 字段、`schemaVersion`、步数约束这些坑
 
 ---
 
-## 十二、许可
+## 十三、许可
 
 AGPL-3.0。上游附加条款原文与 NOTICE 在包内。
 
