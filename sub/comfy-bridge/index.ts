@@ -275,16 +275,17 @@ export async function apply(ctx: Context) {
   }
 
   /** 工作流清单由生图插件给：这边只读它公开的服务，不碰它的目录。 */
-  async function readWorkflows(): Promise<Workflow[]> {
+  async function readWorkflows(): Promise<Workflow[] | null> {
     const service = assetsOf();
-    if (!service) return [];
+    if (!service) return null;
     try {
       const rawWf = await service.listWorkflows();
-      return (Array.isArray(rawWf) ? rawWf : [])
+      if (!Array.isArray(rawWf)) return null;
+      return rawWf
         .filter((item) => item && typeof item.name === "string")
         .map((item) => ({ name: item.name, size: Number(item.size ?? 0), mtime: String(item.mtime ?? "") }))
         .sort((a, b) => a.name.localeCompare(b.name));
-    } catch { return []; }
+    } catch { return null; }
   }
 
   /** 画布工程快照里已经有的流程 id。读不到就当一条都没有，不影响别的。 */
@@ -321,7 +322,7 @@ export async function apply(ctx: Context) {
   }
 
   /** 把包摊开：几个节点、用什么工具、提示词写什么、要哪个工作流。 */
-  async function readCanvasFlows(workflowNames: Set<string>, registered: Set<string>, imports: Imports): Promise<CanvasFlow[]> {
+  async function readCanvasFlows(workflowNames: Set<string> | null, registered: Set<string>, imports: Imports): Promise<CanvasFlow[]> {
     // 两处来源：生图插件那边（ComfyUI 导出的）和本插件自己收的（别的软件推来的）。
     // 提供方停用时，后者仍然列得出来——手动导入不依赖 comfy。
     const list: { slug: string; size: number; mtime: string; text: string }[] = [...readImported()];
@@ -362,7 +363,7 @@ export async function apply(ctx: Context) {
           tools,
           prompts,
           workflowFiles,
-          missingWorkflows: workflowFiles.filter((name) => !workflowNames.has(name)),
+          missingWorkflows: workflowNames ? workflowFiles.filter((name) => !workflowNames.has(name)) : [],
           registered: typeof flow?.id === "string" && registered.has(flow.id),
           problems,
           provider: origin?.provider ?? "",
@@ -380,17 +381,19 @@ export async function apply(ctx: Context) {
     const imports = await readImports();
     const has = installed();
     const ready = toolReady();
-    const workflows = await readWorkflows();
-    const workflowNames = new Set(workflows.map((w) => w.name));
+    const listing = await readWorkflows();
+    const workflows = listing ?? [];
+    const workflowState = listing === null ? "unavailable" : listing.length === 0 ? "empty" : "ready";
+    const workflowNames = listing === null ? null : new Set(listing.map((w) => w.name));
     const allFlows = await readCanvasFlows(workflowNames, registeredFlowIds(), imports);
     const flows = settings.strict ? allFlows.filter((flow) => !flow.problems.length) : allFlows;
     const rejected = allFlows.length - flows.length;
     const broken = flows.filter((flow) => flow.missingWorkflows.length);
-    const note = !has
-      ? "没装《生图》插件（comfy），或者它这个版本还没提供 comfy.assets 服务——当前版本不支持自动列出工作流。手动导入功能包和出图照常，装上/升级生图插件后这里才列得出工作流。"
-      : !ready
-        ? "《生图》插件在，但 comfy_generate 还没注册上——多半是它自己没加载成功，去控制台看它的报错。"
-        : workflows.length ? "" : "《生图》插件在，但 workflows 目录里没有 .json 工作流。去 ComfyUI 里点「存到 WhaleLife」导出一份。";
+    const note = workflowState === "unavailable"
+      ? "工作流列表服务不可用。仍可手动导入功能包，已可用的出图工具照常，服务恢复后会重新读取。"
+      : workflowState === "empty"
+        ? "workflows 目录里没有 .json 工作流。去 ComfyUI 里点「存到 WhaleLife」导出一份。"
+        : !ready ? "《生图》插件在，但 comfy_generate 还没注册上，去控制台看它的报错。" : "";
     return {
       ok: has && ready,
       installed: has,
@@ -398,6 +401,7 @@ export async function apply(ctx: Context) {
       dir: has ? "comfy.assets（生图插件提供）" : "",
       flowsDir: has ? "comfy.assets（生图插件提供）" : "",
       workflows,
+      workflowState,
       flows,
       rejected,
       broken: broken.map((flow) => ({ slug: flow.slug, missing: flow.missingWorkflows })),
@@ -442,6 +446,7 @@ export async function apply(ctx: Context) {
         installed: current.installed,
         toolReady: current.toolReady,
         workflows: current.workflows,
+        workflowState: current.workflowState,
         canvasFlows: current.flows.map(({ slug, name, flowId, tools, workflowFiles, missingWorkflows, registered, providerName, mtime }) => ({
           slug, name, flowId, tools, workflowFiles, missingWorkflows, registered, provider: providerName, mtime,
         })),
@@ -461,9 +466,9 @@ export async function apply(ctx: Context) {
     const health = [
       `<span class="badge${current.installed ? " ok" : " bad"}">生图插件：${current.installed ? "已安装" : "没装"}</span>`,
       `<span class="badge${current.toolReady ? " ok" : " bad"}">comfy_generate：${current.toolReady ? "可用" : "没注册上"}</span>`,
-      `<span class="badge${current.workflows.length ? "" : " warn"}">工作流 ${current.workflows.length} 个</span>`,
+      `<span class="badge${current.workflows.length ? "" : " warn"}">${current.workflowState === "unavailable" ? "工作流列表服务不可用" : `工作流 ${current.workflows.length} 个`}</span>`,
       `<span class="badge${current.flows.length ? "" : " warn"}">功能包 ${current.flows.length} 个${current.rejected ? ` · 隐藏 ${current.rejected}` : ""}</span>`,
-      `<span class="badge${current.broken.length ? " bad" : " ok"}">缺工作流的包 ${current.broken.length} 个</span>`,
+      `${current.workflowState === "unavailable" ? "" : `<span class="badge${current.broken.length ? " bad" : " ok"}">缺工作流的包 ${current.broken.length} 个</span>`}`,
       `<span class="badge">已导入画布 ${current.flows.filter((flow) => flow.registered).length} 个</span>`,
       `<span class="badge">功能 ${current.providers.length + 1} 个（外部 ${current.providers.length}）</span>`,
       `<span class="badge">画布 <code>${escape(settings.canvasUrl)}</code></span>`,
@@ -505,7 +510,7 @@ export async function apply(ctx: Context) {
 
     const workflowRows = current.workflows.length
       ? current.workflows.map((w) => `<tr><td><code>${escape(w.name)}</code></td><td>${Math.round(w.size / 102.4) / 10} KB</td><td>${escape(w.mtime.slice(0, 19).replace("T", " "))}</td></tr>`).join("")
-      : `<tr><td colspan="3" class="muted">没有工作流文件</td></tr>`;
+      : `<tr><td colspan="3" class="muted">${current.workflowState === "unavailable" ? "工作流列表服务不可用" : "没有工作流文件"}</td></tr>`;
 
     const providerBlocks = current.providers.length
       ? current.providers.map((provider) => {

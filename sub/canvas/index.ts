@@ -266,7 +266,7 @@ export async function apply(ctx: Context) {
     }
     try {
       // --parent-pid 给脚本自己兜底：宿主被硬杀时插件来不及收尾，画布发现自己成了孤儿就退出。
-      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream", String(upstream), "--upstream-path", pathOf(cfg.upstreamUrl), "--owner", cfg.ownerToken, "--parent-pid", String(process.ppid)],
+      const child = spawn(process.execPath, [script, "--port", String(cfg.port), "--upstream-url", cfg.upstreamUrl, "--upstream-path", pathOf(cfg.upstreamUrl), "--owner", cfg.ownerToken, "--parent-pid", String(process.ppid)],
         { cwd: dirname(script), detached: true, stdio: "ignore", windowsHide: true });
       child.unref();
       canvasChild = child;

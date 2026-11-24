@@ -44,6 +44,8 @@ interface Shell {
   label: string;
   /** 从技能推导出来的危险等级，不让壳自己填。 */
   danger: Danger;
+  /** 发布时技能接口返回的原始危险声明。旧记录可能没有。 */
+  requiredPermission?: Danger;
   /** 加壳那一刻技能的版本，只在页面上比对，不参与运行。 */
   skillRevision: number;
   /** 关掉就不注册工具，记录还在。 */
@@ -71,10 +73,14 @@ interface SkillInfo {
   name: string;
   description: string;
   kind: string;
-  danger: Danger;
+  requiredPermission?: Danger;
   revision: number;
   stepCount: number;
   params: Param[];
+}
+
+function declaredDanger(value: unknown): Danger | undefined {
+  return value === "safe" || value === "ask" || value === "full" ? value : undefined;
 }
 
 const EMPTY: Store = { schemaVersion: 1, items: [] };
@@ -179,6 +185,7 @@ export async function apply(ctx: Context) {
           toolName: item.toolName,
           label: typeof item.label === "string" && item.label.trim() ? item.label : item.skillId,
           danger: (item.danger === "full" || item.danger === "safe" ? item.danger : "ask") as Danger,
+          requiredPermission: declaredDanger(item.requiredPermission),
           skillRevision: Number.isInteger(item.skillRevision) ? item.skillRevision : 0,
           enabled: item.enabled !== false,
           addedAt: typeof item.addedAt === "string" ? item.addedAt : new Date().toISOString(),
@@ -209,7 +216,7 @@ export async function apply(ctx: Context) {
           name: String(item?.name ?? ""),
           description: String(item?.description ?? ""),
           kind: String(item?.kind ?? "single"),
-          danger: (item?.danger === "safe" || item?.danger === "full" ? item.danger : "ask") as Danger,
+          requiredPermission: declaredDanger(item?.danger),
           revision: Number(item?.revision ?? 0),
           stepCount: Number(item?.stepCount ?? 0),
           params: Array.isArray(item?.params) ? item.params : [],
@@ -225,7 +232,7 @@ export async function apply(ctx: Context) {
         name: String(item?.name ?? ""),
         description: String(item?.description ?? ""),
         kind: String(item?.kind ?? "single"),
-        danger: (item?.danger === "safe" || item?.danger === "full" ? item.danger : "ask") as Danger,
+        requiredPermission: declaredDanger(item?.danger),
         revision: Number(item?.revision ?? 0),
         stepCount: Number(item?.stepCount ?? 0),
         params: [],
@@ -254,39 +261,35 @@ export async function apply(ctx: Context) {
       schema: schemaFor(skillIndex.get(shell.skillId)?.params ?? []),
       async run(args: unknown, session: ToolSession) {
         const started = Date.now();
-        const params = pickParams(args, skillIndex.get(shell.skillId)?.params ?? []);
         try {
-          // 危险等级只决定「要不要问」。放行条件是：用户对这一次执行明确确认过。
-          // 拿不到确认就不跑，指路到能确认的入口——壳不替用户点头。
-          let confirmed = false;
-          if (shell.danger !== "safe") {
-            const verdict: any = await Promise.resolve()
-              .then(() => ctx.approval?.request())
-              .catch(() => ({ approved: false }));
-            confirmed = verdict?.approved === true;
-            if (!confirmed) {
-              const why =
-                typeof verdict?.reason === "string" && verdict.reason
-                  ? "（宿主：" + verdict.reason + "）"
-                  : "";
-              return {
-                status: "needs_confirmation",
-                skill: shell.skillId,
-                note:
-                  "这条技能含副作用步骤，要先对本次执行明确确认。" +
-                  why +
-                  "当前入口拿不到确认，请在能确认的地方再跑一次（例如在聊天里直接让助手执行这条技能，由宿主来问）。",
-                took: Date.now() - started,
-              };
-            }
+          if (shell.requiredPermission === undefined) {
+            return { status: "blocked", skill: shell.skillId, note: "壳记录里没有技能的权限声明，请删除旧壳后重新发布。" };
           }
+          const hasSideEffects = shell.requiredPermission !== "safe";
+          if (hasSideEffects && session?.permission !== "full") {
+            return {
+              status: "needs_confirmation",
+              skill: shell.skillId,
+              note: "这条技能含副作用步骤，需要会话显式授予 full 权限。",
+              took: Date.now() - started,
+            };
+          }
+          const current = await fetchSkills();
+          const skill = current.items.find(item => item.id === shell.skillId);
+          if (!current.ok || skill?.requiredPermission === undefined) {
+            return { status: "blocked", skill: shell.skillId, note: "读不到当前技能的权限声明，无法执行。" };
+          }
+          if (shell.requiredPermission !== skill.requiredPermission) {
+            return { status: "blocked", skill: shell.skillId, note: "技能的权限声明已变更，请删除旧壳后重新发布。" };
+          }
+          const params = pickParams(args, skill.params);
           const raw: any = await ctx.tools.call("space_run", {
             id: shell.skillId,
             params,
-            confirmSideEffects: confirmed,
+            confirmSideEffects: hasSideEffects,
             via: "self",
           }, {
-            // 透传调用者的权限，不写死；放不放行由上一步的确认单独决定。
+            // 原样透传调用者权限。
             permission: session?.permission,
             signal: session?.signal,
             origin: { plugin: "thinking-space/shells", action: shell.skillId },
@@ -379,7 +382,7 @@ export async function apply(ctx: Context) {
 
     const options = (skillsOk ? skills : [])
       .filter(item => !store.items.some(shell => shell.skillId === String(item.id)))
-      .map(item => `<option value="${escape(item.id)}">${escape(item.name)}（${escape(item.kind)} · ${Number(item.stepCount ?? 0)} 步 · ${escape(item.danger)}）</option>`)
+      .map(item => `<option value="${escape(item.id)}">${escape(item.name)}（${escape(item.kind)} · ${Number(item.stepCount ?? 0)} 步 · ${escape(item.requiredPermission ?? "权限未知")}）</option>`)
       .join("");
 
     const notice = note ? `<p class="notice ${tone}">${escape(note)}</p>` : "";
@@ -457,13 +460,14 @@ ${notice}
       const skill = items.find(item => String(item.id) === skillId);
       if (!skill) return redirect(res, "技能库里没有 " + skillId + "。", "bad");
 
-      const danger: Danger = skill.danger === "safe" || skill.danger === "full" ? skill.danger : "ask";
+      if (skill.requiredPermission === undefined) return redirect(res, "技能没有有效的权限声明，无法加壳。", "bad");
       const taken = new Set<string>(store.items.map(item => item.toolName));
       const shell: Shell = {
         skillId,
         toolName: uniqueName(toToolName(skillId), taken),
         label: String(skill.name ?? skillId).slice(0, 40),
-        danger,
+        danger: skill.requiredPermission,
+        requiredPermission: skill.requiredPermission,
         skillRevision: Number(skill.revision ?? 0),
         enabled: true,
         addedAt: new Date().toISOString(),

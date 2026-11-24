@@ -1,4 +1,5 @@
 const http = require('node:http');
+const https = require('node:https');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -8,13 +9,19 @@ function argOf(name) {
 }
 const parentPid = Number(argOf('--parent-pid') || 0);
 const rawPort = String(argOf('--port') || process.env.WORKBENCH_PORT || '').trim();
+const host = '127.0.0.1';
+const rawUpstreamUrl = argOf('--upstream-url');
 const rawUpstream = String(argOf('--upstream') || process.env.WORKBENCH_WHALE_PORT || '').trim();
-if (!rawPort || !rawUpstream) {
-  console.error('缺少端口参数：画布没有默认端口。必须显式给 --port <端口> --upstream <宿主端口>。');
+if (!rawPort || (!rawUpstreamUrl && !rawUpstream)) {
+  console.error('缺少端口参数：画布没有默认端口。必须显式给 --port <端口> --upstream-url <宿主 URL>（或 --upstream <宿主端口>）。');
   process.exit(2);
 }
 const port = Number(rawPort);
-const upstream = Number(rawUpstream);
+const target = rawUpstreamUrl ? new URL(rawUpstreamUrl) : null;
+if (target && !['http:', 'https:'].includes(target.protocol)) throw new Error('--upstream-url 必须是 HTTP 或 HTTPS 地址。');
+const upstream = target ? Number(target.port || (target.protocol === 'https:' ? 443 : 80)) : Number(rawUpstream);
+const upstreamHost = target ? target.hostname.replace(/^\[|\]$/g, '') : host;
+const upstreamHttp = target?.protocol === 'https:' ? https : http;
 if (![port, upstream].every(value => Number.isInteger(value) && value > 0 && value <= 65535) || port === upstream) {
   throw new Error('请选择两个不同的有效端口。');
 }
@@ -28,9 +35,9 @@ const upPath = (u) => {
   if (!upstreamPath || tail === upstreamPath || tail.startsWith(upstreamPath + '/')) return tail;
   return upstreamPath + tail;
 };
-const host = '127.0.0.1';
 const origin = `http://${host}:${port}`;
-const targetOrigin = `http://${host}:${upstream}`;
+const targetOrigin = target?.origin ?? `http://${host}:${upstream}`;
+const targetAuthority = target?.host ?? `${host}:${upstream}`;
 const identityRoute = 'GET /api/workbench/identity';
 const allowedRoutes = new Set(['POST /api/login', 'GET /api/status', 'GET /api/session/current', 'POST /plugins/workbench-readonly/search-read', identityRoute, 'GET /api/session', 'GET /api/official-plugins', 'POST /api/official-plugins/apply', 'GET /api/community-plugins', 'POST /api/community-plugins/apply', 'GET /plugins/thinking-space/flows', 'POST /plugins/thinking-space/flows', 'GET /plugins/thinking-space/skill', 'GET /plugins/thinking-space/tools', 'GET /plugins/thinking-space/skills', 'POST /plugins/thinking-space/publish', 'GET /plugins/thinking-space/comfy-bridge/flows']);
 function localHost(req) {
@@ -42,7 +49,7 @@ function allowed(req) {
     (!req.headers['sec-fetch-site'] || ['same-origin', 'none'].includes(req.headers['sec-fetch-site']));
 }
 function headers(req) {
-  return { ...req.headers, host: `${host}:${upstream}`, origin: targetOrigin };
+  return { ...req.headers, host: targetAuthority, origin: targetOrigin };
 }
 // 首页文件名：index.html 优先；否则认浏览器下载默认名 canvas-index.html；
 // 再否则用目录里唯一的 .html。
@@ -70,7 +77,7 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET' && (req.url.startsWith('/market/') || req.url.startsWith('/plugins/thinking-space/'))) {
     if (!allowed(req)) { res.writeHead(403).end(); return; }
-    const request = http.request({hostname:host,port:upstream,path:upPath(req.url),method:'GET',headers:headers(req)}, response => {
+    const request = upstreamHttp.request({hostname:upstreamHost,port:upstream,path:upPath(req.url),method:'GET',headers:headers(req)}, response => {
       res.writeHead(response.statusCode, response.headers);
       response.pipe(res);
     });
@@ -85,7 +92,7 @@ const server = http.createServer((req, res) => {
   const route=req.method+' '+req.url.split('?')[0];
   if (!allowedRoutes.has(route)) { res.writeHead(404).end(); return; }
   const isIdentity=route===identityRoute;
-  const request = http.request({hostname:host,port:upstream,path:isIdentity?upPath('/api/status'):upPath(req.url),method:req.method,headers:headers(req)}, async response => {
+  const request = upstreamHttp.request({hostname:upstreamHost,port:upstream,path:isIdentity?upPath('/api/status'):upPath(req.url),method:req.method,headers:headers(req)}, async response => {
     if(isIdentity){
       const send=(status,data)=>res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}).end(JSON.stringify(data));
       if(response.statusCode!==200){
@@ -121,7 +128,7 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
-  const request = http.request({hostname:host,port:upstream,path:upPath(req.url),method:'GET',headers:headers(req)});
+  const request = upstreamHttp.request({hostname:upstreamHost,port:upstream,path:upPath(req.url),method:'GET',headers:headers(req)});
   request.on('upgrade', (response, remote, buffered) => {
     if (socket.destroyed) { remote.destroy(); return; }
     const lines = ['HTTP/1.1 101 Switching Protocols'];
@@ -158,7 +165,7 @@ if (process.env.WORKBENCH_WATCH_PARENT !== '0') {
   };
   const probe = () => {
     if (stopped || Date.now() - startedAt < graceMs) return;
-    const socket = net.connect({ host, port: upstream });
+    const socket = net.connect({ host: upstreamHost, port: upstream });
     let settled = false;
     const settle = (hit) => {
       if (settled) return;

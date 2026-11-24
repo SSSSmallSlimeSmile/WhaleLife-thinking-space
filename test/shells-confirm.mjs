@@ -1,12 +1,4 @@
-// 壳的确认语义：危险等级只决定「要不要问」，放行条件是用户对本次执行明确确认。
-//
-// 三条规矩：
-// 1. 壳不替用户点头：以前传的是 `session.permission === "full"`，等于把「用户长期授权」
-//    当成「这次同意」，含副作用步骤的技能就被壳自动批准了。
-// 2. 现在去问宿主审批（ctx.approval.request）；拿到 approved 才传 confirmSideEffects: true。
-// 3. 拿不到确认就不跑，回 needs_confirmation，指路到能确认的入口。
-//
-// 跑法：node test/shells-confirm.mjs
+// 只读壳直接运行。含副作用的壳仅接受显式的 full 会话权限。
 import { pathToFileURL } from "node:url";
 
 const mod = await import(
@@ -20,6 +12,7 @@ const item = (skill) => ({
   toolName: "skill_" + skill.id.replace(/-/g, "_"),
   label: skill.name,
   danger: skill.danger,
+  requiredPermission: skill.danger,
   skillRevision: skill.revision,
   enabled: true,
   addedAt: "2026-01-01T00:00:00.000Z",
@@ -32,20 +25,15 @@ const check = (label, ok, extra = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${label}${extra ? "  — " + extra : ""}`);
 };
 
-function makeCtx({ approved = false, approvals = 0 } = {}) {
+function makeCtx({ store = STORE, skills = [SKILL, SAFE_SKILL] } = {}) {
   const tools = [];
   const calls = [];
-  const asked = { count: approvals };
+  const routes = new Map();
+  const saved = [];
   const ctx = {
-    config: { read: async () => STORE, save: async () => {} },
+    config: { read: async () => store, save: async (_file, value) => saved.push(JSON.parse(JSON.stringify(value))) },
     get: (name) =>
-      name === "thinking-space.skills" ? { describe: async () => [SKILL, SAFE_SKILL] } : undefined,
-    approval: {
-      request: async () => {
-        asked.count += 1;
-        return { approved, reason: approved ? undefined : "宿主没有审批流" };
-      },
-    },
+      name === "thinking-space.skills" ? { describe: async () => skills } : undefined,
     tools: {
       register: (tool) => {
         tools.push(tool);
@@ -60,61 +48,67 @@ function makeCtx({ approved = false, approvals = 0 } = {}) {
         return { ok: true, result: { status: "ok", runId: "r1", steps: [{}] } };
       },
     },
-    web: { page: () => {}, api: () => {} },
+    web: { page: () => {}, api: (path, handler) => routes.set(path, handler) },
     logger: { info() {}, warn() {}, error() {} },
   };
-  return { ctx, tools, calls, asked };
+  return { ctx, tools, calls, routes, saved };
 }
 
-async function runTool(name, { permission, approved } = {}) {
-  const built = makeCtx({ approved });
+async function runTool(name, { permission, ...options } = {}) {
+  const built = makeCtx(options);
   await mod.apply(built.ctx);
   const tool = built.tools.find((t) => t.name === name);
   const out = await tool.run({}, permission === undefined ? undefined : { permission });
   return { ...built, tool, out };
 }
 
-// 1. 含副作用 + 拿不到确认：不调 space_run
-{
-  const { calls, out } = await runTool("skill_side_demo", { permission: "full", approved: false });
-  const runs = calls.filter((c) => c.name === "space_run");
-  check("含副作用且未确认时不执行", runs.length === 0, String(runs.length));
-  check("返回 needs_confirmation", out?.status === "needs_confirmation", String(out?.status));
-  check("指路到能确认的入口", /请.*再跑一次|能确认/.test(String(out?.note ?? "")), "");
+// 1. 非 full 会话与缺失会话都不执行含副作用的技能。
+for (const permission of ["off", "ask", undefined]) {
+  const { calls, out } = await runTool("skill_side_demo", { permission });
+  check(`含副作用且会话权限为 ${permission} 时零调用`, calls.length === 0);
+  check("提示需要显式 full 权限", out?.status === "needs_confirmation" && /full/.test(out.note));
 }
 
-// 2. 含副作用 + 明确确认：放行，且只发一次
+// 2. full 会话授权后放行，并透传权限。
 {
-  const { calls, out, asked } = await runTool("skill_side_demo", { permission: "full", approved: true });
+  const { calls, out } = await runTool("skill_side_demo", { permission: "full" });
   const runs = calls.filter((c) => c.name === "space_run");
-  check("确认后放行，只发一次 space_run", runs.length === 1, String(runs.length));
-  check("确认后 confirmSideEffects 是 true", runs[0]?.args?.confirmSideEffects === true, String(runs[0]?.args?.confirmSideEffects));
-  check("确认前确实问过审批", asked.count >= 1, String(asked.count));
-  check("执行完成", out?.status === "ok", String(out?.status));
+  check("full 权限只发一次 space_run", runs.length === 1);
+  check("含副作用时 confirmSideEffects 为 true", runs[0]?.args?.confirmSideEffects === true);
+  check("调用者权限原样透传", runs[0]?.opts?.permission === "full");
+  check("执行完成", out?.status === "ok");
 }
 
-// 3. 只读技能：不问审批，也不需要确认
-{
-  const { calls, asked } = await runTool("skill_safe_demo", { permission: "ask", approved: false });
-  const runs = calls.filter((c) => c.name === "space_run");
-  check("只读技能照常放行", runs.length === 1, String(runs.length));
-  check("只读技能不问审批", asked.count === 0, String(asked.count));
-  check("只读技能 confirmSideEffects 是 false", runs[0]?.args?.confirmSideEffects === false, String(runs[0]?.args?.confirmSideEffects));
-}
-
-// 4. 调用者权限照旧透传
-{
-  const { calls } = await runTool("skill_side_demo", { permission: "full", approved: true });
+// 3. 只读壳无需会话授权，即使是 full 也不开放副作用。
+for (const permission of [undefined, "full"]) {
+  const { calls, out } = await runTool("skill_safe_demo", { permission });
   const run = calls.find((c) => c.name === "space_run");
-  check("调用者权限原样透传", run?.opts?.permission === "full", String(run?.opts?.permission));
+  check(`只读壳在 ${permission} 权限下直接运行，副作用不放行`, out?.status === "ok" && run?.args?.confirmSideEffects === false);
 }
 
-// 5. 没有会话信息：同样不放行含副作用的技能
+// 4. 用实际发布路由写入，再启动一个新实例读取。
 {
-  const { calls, out } = await runTool("skill_side_demo", { approved: false });
-  const runs = calls.filter((c) => c.name === "space_run");
-  check("没有会话信息时不执行含副作用技能", runs.length === 0, String(runs.length));
-  check("没有会话信息时也回 needs_confirmation", out?.status === "needs_confirmation", String(out?.status));
+  const built = makeCtx({ store: { schemaVersion: 1, items: [] } });
+  await mod.apply(built.ctx);
+  const add = built.routes.get("/plugins/thinking-space/shells/add");
+  await add([Buffer.from("skillId=side-demo")], { writeHead() {}, end() {} });
+  const store = built.saved[0];
+  check("发布写入原始权限声明", store?.items[0]?.requiredPermission === SKILL.danger);
+  const restarted = await runTool("skill_side_demo", { permission: "full", store });
+  check("重启读回声明后凭 full 授权执行", restarted.out.status === "ok" && restarted.calls.length === 1);
+}
+
+// 5. 旧记录以及当前声明变化均拒绝运行。
+{
+  const store = { schemaVersion: 1, items: [{ ...item(SKILL), requiredPermission: undefined }] };
+  const legacy = await runTool("skill_side_demo", { permission: "full", store });
+  check("旧记录可注册，执行时说明缺声明且零调用", legacy.out.status === "blocked" && /没有.*权限声明/.test(legacy.out.note) && legacy.calls.length === 0);
+  const skills = [{ ...SKILL }];
+  const built = makeCtx({ skills });
+  await mod.apply(built.ctx);
+  skills[0].danger = "full";
+  const drifted = await built.tools.find((tool) => tool.name === "skill_side_demo").run({}, { permission: "full" });
+  check("注册后权限漂移时阻止执行", drifted.status === "blocked" && /权限声明已变更/.test(drifted.note) && built.calls.length === 0);
 }
 
 const failed = results.filter((r) => !r.ok).length;

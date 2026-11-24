@@ -29,7 +29,7 @@ function check(label, ok, extra = "") {
 }
 
 /** 假 ctx。skills 为 null 表示服务不在，退回 space_skills 工具。 */
-function makeCtx({ store = { schemaVersion: 1, items: [{ skillId: SKILL_ID, toolName: "skill_param_demo", label: "带参数", danger: "safe", skillRevision: 4, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] }, skills = [SKILL], runResult = { ok: true, result: { status: "ok", runId: "r1", steps: [{}] } } } = {}) {
+function makeCtx({ store = { schemaVersion: 1, items: [{ skillId: SKILL_ID, toolName: "skill_param_demo", label: "带参数", danger: "safe", requiredPermission: "safe", skillRevision: 4, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] }, skills = [SKILL], runResult = { ok: true, result: { status: "ok", runId: "r1", steps: [{}] } } } = {}) {
   const tools = [];
   const calls = [];
   const ctx = {
