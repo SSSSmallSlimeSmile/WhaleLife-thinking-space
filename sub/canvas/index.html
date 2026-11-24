@@ -33,6 +33,7 @@ main>.toolbar{margin:0 clamp(12px,3vw,44px);padding:23px 0 15px;border:0}
 .node-head{background:var(--hover);border-radius:11px 11px 0 0}
 .node-head button{background:transparent}
 .node input{background:var(--field)}
+.node select{display:block;width:calc(100% - 22px);max-width:calc(100% - 22px);margin:3px 11px 10px;padding:5px 7px;font-size:14px;text-overflow:ellipsis}
 .port,.port:hover{background:var(--accent);border:2px solid var(--panel)}
 .port.pending{box-shadow:0 0 0 4px var(--ring)}
 .side{padding:18px}
@@ -1293,7 +1294,8 @@ function declaredPortSummary(entry){
   const settled=entry.verify!=='pending';
   return portSummary(entry.ports.inputs.length?entry.ports.inputs:(settled?[]:null),entry.ports.outputs.length?entry.ports.outputs:(settled?[]:null));
 }
-function portTypeMarkup(port){
+function portTypeMarkup(port,label){
+  if(label!==undefined&&label===portTypeLabel(port?.type))return '';
   const detail=[port?.role?`用途：${port.role}`:'',port?.field?`字段：${port.field}`:'',port?.type?`类型：${port.type}`:''].filter(Boolean).join(' · ');
   return `<small class="port-type"${detail?` title="${safe(detail)}"`:''}>${safe(portTypeLabel(port?.type))}</small>`;
 }
@@ -1497,9 +1499,9 @@ function whaleNode(node,tool,view){
     ${portSummary(inputs,output?[output]:[])}
     ${tool.contract?`<div class="node-meta">${safe(tool.plugin)} · ${tool.contract.danger}${tool.id==='chime_test'?' · 播放声音':''}</div>`:''}
     ${issue?`<div class="node-meta">${safe(issue)}</div>`:''}${contractFor(tool)?`<div class="node-meta" title="静态契约核实状态">${safe(contractConfidence[contractFor(tool).verify])}</div>`:''}
-    ${shown.map(key=>`<div class="port-row"><button class="port in" data-port="in" data-field="${key}" aria-label="连接至 ${safe(whaleFields[key]||key)}" ${!fields[key]||issue==='工具不可用'?'disabled':''}></button>${safe(whaleFields[key]||key)}${portTypeMarkup(inputs.find(port=>port.field===key))}</div>${!linked.includes(key)&&fields[key]&&fields[key].type!=='signal'&&tool.contract?whaleInput(node,key,fields[key],true):''}${tool.id==='comfy_generate'&&key==='workflow'&&!linked.includes(key)?workflowPick(node,node.params?.workflow):''}`).join('')}
+    ${shown.map(key=>`<div class="port-row"><button class="port in" data-port="in" data-field="${key}" aria-label="连接至 ${safe(whaleFields[key]||key)}" ${!fields[key]||issue==='工具不可用'?'disabled':''}></button>${safe(whaleFields[key]||key)}${portTypeMarkup(inputs.find(port=>port.field===key),whaleFields[key]||key)}</div>${!linked.includes(key)&&fields[key]&&fields[key].type!=='signal'&&tool.contract?whaleInput(node,key,fields[key],true):''}${tool.id==='comfy_generate'&&key==='workflow'&&!linked.includes(key)?workflowPick(node,node.params?.workflow):''}`).join('')}
     ${['input_text','qq_group_input'].includes(tool.id)?`<input data-param="value" aria-label="示例文本" value="${safe(node.value)}">`:''}
-    ${output?`<div class="port-row out">${safe(output.label)}${portTypeMarkup(output)}<button class="port out ${view.pending===node.id?'pending':''}" data-port="out" aria-label="连接 ${safe(output.label)}"></button></div>`:''}
+    ${output?`<div class="port-row out">${safe(output.label)}${portTypeMarkup(output,output.label)}<button class="port out ${view.pending===node.id?'pending':''}" data-port="out" aria-label="连接 ${safe(output.label)}"></button></div>`:''}
   ${nodeDeltaMarkup(node)}</section>`;
 }
 function whaleDetails(node,tool,flow){
@@ -2766,7 +2768,7 @@ function unknownTool(type){
 function nodeMarkup(node,view){
   const tool=getTool(node.type)||unknownTool(node.type);
   if(tool.whale)return whaleNode(node,tool,view);
-  return `<section data-node-kind="${nodeClass(tool)}" class="node ${view.selected===node.id?'selected':''}" data-node="${node.id}" style="left:${node.x}px;top:${node.y}px"><div class="node-head"><span class="symbol">◇</span><strong>${safe(tool.name)}</strong>${node.type==='qq_group_output'?'<span class="node-action-tag">发送消息</span>':''}<button data-action="detail" aria-label="节点详情">⋯</button></div>${toolPortSummary(tool)}${tool.input?`<div class="port-row"><button class="port in" data-port="in" aria-label="连接至${safe(tool.input)}"></button>${safe(tool.input)}${portTypeMarkup(inputPorts(tool)[0])}</div>`:''}${tool.output?`<div class="port-row out">${safe(tool.output)}${portTypeMarkup(outputPort(tool))}<button class="port out ${view.pending===node.id?'pending':''}" data-port="out" aria-label="连接${safe(tool.output)}"></button></div>`:''}${tool.parameter?`<input data-param="value" aria-label="${safe(tool.parameter)}" placeholder="${safe(tool.parameter)}" value="${safe(node.value??tool.value)}">`:''}${nodeDeltaMarkup(node)}</section>`;
+  return `<section data-node-kind="${nodeClass(tool)}" class="node ${view.selected===node.id?'selected':''}" data-node="${node.id}" style="left:${node.x}px;top:${node.y}px"><div class="node-head"><span class="symbol">◇</span><strong>${safe(tool.name)}</strong>${node.type==='qq_group_output'?'<span class="node-action-tag">发送消息</span>':''}<button data-action="detail" aria-label="节点详情">⋯</button></div>${toolPortSummary(tool)}${tool.input?`<div class="port-row"><button class="port in" data-port="in" aria-label="连接至${safe(tool.input)}"></button>${safe(tool.input)}${portTypeMarkup(inputPorts(tool)[0],tool.input)}</div>`:''}${tool.output?`<div class="port-row out">${safe(tool.output)}${portTypeMarkup(outputPort(tool),tool.output)}<button class="port out ${view.pending===node.id?'pending':''}" data-port="out" aria-label="连接${safe(tool.output)}"></button></div>`:''}${tool.parameter?`<input data-param="value" aria-label="${safe(tool.parameter)}" placeholder="${safe(tool.parameter)}" value="${safe(node.value??tool.value)}">`:''}${nodeDeltaMarkup(node)}</section>`;
 }
 function renderSide(flow,view){
   const side=main.querySelector('.side');
