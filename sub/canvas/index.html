@@ -846,7 +846,7 @@ const nodeDrafts=new Map();
 function nodeSettings(flow,nodeId){
   const node=flow.nodes.find(item=>item.id===nodeId);
   if(!node)return;
-  const tool=getTool(node.type);
+  const tool=getTool(node.type)||unknownTool(node.type);
   modalNodeRoute={flow:flow.id,node:nodeId};
   const relation=tool.functionRef?referenceNames([flow.id,tool.functionRef]):'';
   showDialog('节点设置',`<p>${safe(tool.name)}</p>${relation?`<p class="muted">引用：${safe(relation)}</p>`:''}<div class="actions">
@@ -859,7 +859,7 @@ function renderNodePage(modal=false){
   const root=modal?dialog:main;
   const {flow,node}=detailPageData(active,modal?modalNodeRoute:detailTabs[active]);
   if(!node){root.innerHTML='<section><p>这个节点已从画布移除。</p><button data-action="dismiss">关闭</button></section>';return;}
-  const tool=getTool(node.type);
+  const tool=getTool(node.type)||unknownTool(node.type);
   const refs=flow.edges.filter(([,to])=>to===node.id);
   const fields=tool.whale?whaleFieldsFor(tool):{};
   const formField=(key,label,value,multiline=false)=>{
@@ -1738,11 +1738,12 @@ function nextPage(flow,view){
   renderEditor();
 }
 
-let tools=saved?.tools ?? initialTools;
-let removedFlows=saved?.removedFlows ?? [];
-let historyLimit=saved?.historyLimit ?? 60;
-let flows=saved?.flows ?? sampleFlows;
-let open=saved?.open?.filter(id=>flows.some(flow=>flow.id===id)) ?? flows.map(flow=>flow.id);
+const savedTools=Array.isArray(saved?.tools)?saved.tools:null;
+let tools=savedTools ?? initialTools;
+let removedFlows=Array.isArray(saved?.removedFlows)?saved.removedFlows:[];
+let historyLimit=Number.isFinite(saved?.historyLimit)?saved.historyLimit:60;
+let flows=Array.isArray(saved?.flows)?saved.flows:sampleFlows;
+let open=Array.isArray(saved?.open)?saved.open.filter(id=>flows.some(flow=>flow.id===id)):flows.map(flow=>flow.id);
 if(false){
   flows.push(...whaleFlows);
   open=[...whaleFlows.map(flow=>flow.id),...open];
@@ -2794,7 +2795,7 @@ function renderSide(flow,view){
   }
   const node=flow.nodes.find(item=>item.id===view.selected);
   if(!node)return;
-  const tool=getTool(node.type);
+  const tool=getTool(node.type)||unknownTool(node.type);
   const upstream=flow.edges.find(([,to])=>to===node.id);
   side.dataset.node=node.id;
   if(tool.whale){side.innerHTML=heading("节点详情")+whaleDetails(node,tool,flow);return;}
@@ -3670,7 +3671,7 @@ function briefValue(value){
   return raw.length>60?raw.slice(0,57)+'…':raw;
 }
 function buildWishContext(flow,node){
-  const tool=getTool(node.type);
+  const tool=getTool(node.type)||unknownTool(node.type);
   return {
     id:node.id,type:node.type,label:tool.name,plugin:tool.plugin||null,
     params:{...(node.params||{})},
