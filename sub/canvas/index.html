@@ -1463,6 +1463,27 @@ function whaleInput(node,key,schema,simple=false){
   const displayed=typeof value==='object'?JSON.stringify(value):value;
   return `<input data-whale-param="${key}" aria-label="${safe(whaleFields[key]||key)}" placeholder="${safe(simple?(whaleFields[key]||key):key)}" value="${safe(displayed)}" ${schema.type==='signal'?'disabled':''}>`;
 }
+let workflowNames=null,workflowNamesNote='';
+async function loadWorkflowNames(){
+  try{
+    const response=await fetch('/plugins/thinking-space/comfy-bridge/workflows',{cache:'no-store'});
+    if(!response.ok)throw Error('HTTP '+response.status);
+    const data=await response.json();
+    workflowNames=(Array.isArray(data.workflows)?data.workflows:[]).map(item=>typeof item==='string'?item:(item&&item.name)).filter(Boolean);
+    workflowNamesNote=data.ok===false?String(data.note||'没读到工作流'):'';
+  }catch(error){
+    workflowNames=[];workflowNamesNote=error.message;
+  }
+  try{render();}catch(error){}
+}
+function workflowPick(node,value){
+  const current=typeof value==='string'?value:'';
+  if(current.includes('${'))return '';
+  if(workflowNames===null)return '<small class="muted">工作流列表读取中…</small>';
+  if(!workflowNames.length)return `<small class="muted">读不到工作流列表${workflowNamesNote?'：'+safe(workflowNamesNote):''}，可以直接手填</small>`;
+  const options=workflowNames.map(name=>`<option value="${safe(name)}" ${name===current?'selected':''}>${safe(name)}</option>`).join('');
+  return `<select data-workflow-pick aria-label="选择工作流"><option value="">（手选工作流）</option>${options}</select>`;
+}
 function whaleNode(node,tool,view){
   const flow=getFlow(), fields=whaleFieldsFor(tool);
   const inputs=inputPorts(tool),output=outputPort(tool);
@@ -1476,7 +1497,7 @@ function whaleNode(node,tool,view){
     ${portSummary(inputs,output?[output]:[])}
     ${tool.contract?`<div class="node-meta">${safe(tool.plugin)} · ${tool.contract.danger}${tool.id==='chime_test'?' · 播放声音':''}</div>`:''}
     ${issue?`<div class="node-meta">${safe(issue)}</div>`:''}${contractFor(tool)?`<div class="node-meta" title="静态契约核实状态">${safe(contractConfidence[contractFor(tool).verify])}</div>`:''}
-    ${shown.map(key=>`<div class="port-row"><button class="port in" data-port="in" data-field="${key}" aria-label="连接至 ${safe(whaleFields[key]||key)}" ${!fields[key]||issue==='工具不可用'?'disabled':''}></button>${safe(whaleFields[key]||key)}${portTypeMarkup(inputs.find(port=>port.field===key))}</div>${!linked.includes(key)&&fields[key]&&fields[key].type!=='signal'&&tool.contract?whaleInput(node,key,fields[key],true):''}`).join('')}
+    ${shown.map(key=>`<div class="port-row"><button class="port in" data-port="in" data-field="${key}" aria-label="连接至 ${safe(whaleFields[key]||key)}" ${!fields[key]||issue==='工具不可用'?'disabled':''}></button>${safe(whaleFields[key]||key)}${portTypeMarkup(inputs.find(port=>port.field===key))}</div>${!linked.includes(key)&&fields[key]&&fields[key].type!=='signal'&&tool.contract?whaleInput(node,key,fields[key],true):''}${tool.id==='comfy_generate'&&key==='workflow'&&!linked.includes(key)?workflowPick(node,node.params?.workflow):''}`).join('')}
     ${['input_text','qq_group_input'].includes(tool.id)?`<input data-param="value" aria-label="示例文本" value="${safe(node.value)}">`:''}
     ${output?`<div class="port-row out">${safe(output.label)}${portTypeMarkup(output)}<button class="port out ${view.pending===node.id?'pending':''}" data-port="out" aria-label="连接 ${safe(output.label)}"></button></div>`:''}
   ${nodeDeltaMarkup(node)}</section>`;
@@ -3294,6 +3315,17 @@ main.addEventListener('input',event=>{
   persist();
 });
 main.addEventListener('change',event=>{
+  if(event.target.dataset.workflowPick!==undefined){
+    const pick=event.target,nodeId=pick.closest('[data-node]')?.dataset.node;
+    const node=nodeId?getFlow().nodes.find(item=>item.id===nodeId):null;
+    if(node&&pick.value){
+      const params=node.params??={};params.workflow=pick.value;
+      const input=pick.closest('[data-node]').querySelector('[data-whale-param="workflow"]');
+      if(input)input.value=pick.value;
+      persist();
+    }
+    return;
+  }
   if(event.target.id==='catalog-mode'){catalogMode=event.target.value;Object.values(views).forEach(invalidateRun);persist();render();showPluginImpact();return;}
   if(event.target.id==='demo-scenario')views[getFlow().id].scenario=event.target.value;
 });
@@ -4753,6 +4785,7 @@ async function load() {
   }
   function boot(){
     collect();render();
+    try{loadWorkflowNames();}catch(error){}
     try{
       fetch('/api/status',{credentials:'same-origin'}).then(function(r){return r.ok?r.json():null;}).then(function(d){
         if(!d||!d.personaName) return;
