@@ -343,12 +343,18 @@ button.market-entry{background:transparent}
 .node-delta-row{color:var(--ink,#1b1f24);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .node-delta-row span{color:#5c6b62;margin-right:4px}
 .node-action-tag{margin-left:6px;font-size:10px;padding:1px 5px;border-radius:999px;background:rgba(31,157,85,.14);color:#1f9d55}
+.io-editor{margin-top:6px}
+.io-editor h4{margin:0 0 4px;font-size:12px;font-weight:600;color:var(--muted,#6b7280)}
+.io-row{display:flex;gap:6px;align-items:center;margin:4px 0}
+.io-row input,.io-row select{min-width:0;flex:1 1 auto}
+.io-row input[name$="-custom"]{flex:0 1 110px}
+.io-editor>button{margin-top:2px;font-size:12px}
 </style>
 <header><b id="robot-initial" aria-hidden="true">__PERSONA__</b><strong id="robot-title">__PERSONA__的思维空间</strong><form id="wish-launch" class="wish-launch"><input aria-label="许愿一个功能" placeholder="许愿一个功能，或聊聊"><button type="submit">许愿一个功能</button></form><label class="theme-control"><span>界面风格</span><select id="theme" aria-label="界面风格"><option value="light">浅色工作台</option><option value="dark">深色画布</option></select></label><button type="button" id="save-project">思维保存</button><button type="button" data-action="project-options">工程管理</button><button type="button" id="reload-canvas" title="重新加载画布（聊天记录保留）">重载画布</button><span id="project-save-feedback" class="sr-only" role="status"></span></header>
 <nav id="tabs" aria-label="工作台标签页"></nav>
 <main id="main"></main>
 <section id="wish-panel" class="wish-panel" aria-label="许愿一个功能" hidden>
-  <div class="wish-panel-top"><h2>许愿一个功能</h2><div class="wish-window-buttons"><button type="button" id="wish-dock" hidden>返回侧栏</button><button type="button" id="wish-close" aria-label="关闭聊天">×</button></div></div>
+  <div class="wish-panel-top"><h2>许愿一个功能</h2><div class="wish-window-buttons"><button type="button" id="wish-dock" hidden>返回侧栏</button><button type="button" id="wish-sync" title="拉取主窗口的新消息（只取没见过的）">刷新</button><button type="button" id="wish-close" aria-label="关闭聊天">×</button></div></div>
   <p class="muted" id="wish-status"></p>
   <p id="wish-connection" class="muted">连接真实的__PERSONA__时，请启动本地桥接后，打开 <a href="http://127.0.0.1:9281/" target="_blank" rel="noopener">WhaleLife 连接版</a>。</p>
   <div id="wish-messages" class="wish-messages" role="log" aria-label="许愿聊天记录"></div>
@@ -1250,7 +1256,11 @@ const portRoles={
   pageRef:'page-ref',after:'signal',image:'image',research:'search-result',
 };
 function inputPorts(tool){
-  if(!tool.whale&&!tool.dynamic)return tool.input?[{label:tool.input,role:portRoles[tool.input],type:'string'}]:[];
+  if(!tool.whale&&!tool.dynamic){
+    const declared=tool.schema&&tool.schema.properties;
+    if(declared)return Object.entries(declared).map(([field,schema])=>({field,label:whaleFields[field]||field,role:portRoles[field],type:(schema&&schema.type)||'string'}));
+    return tool.input?[{label:tool.input,role:portRoles[tool.input],type:'string'}]:[];
+  }
   if(tool.id==='pick_first_url')return [{field:'url',label:'搜索结果',role:'search-result',type:'object'}];
   return Object.entries(whaleFieldsFor(tool)||{}).map(([field,schema])=>({
     field,label:whaleFields[field]||field,
@@ -1259,6 +1269,7 @@ function inputPorts(tool){
 }
 function outputPort(tool){
   if(!tool.output)return null;
+  if(!tool.whale&&!tool.dynamic&&tool.outputSchema&&tool.outputSchema.type)return {label:tool.output,role:portRoles[tool.output],type:tool.outputSchema.type};
   const mockOutputs={
     input_text:['text','string'],pick_first_url:['url','string'],surf_search:['search-result','object'],
     surf_read:['text','string'],comfy_generate:['text','string'],qq_group_input:['message','object'],
@@ -1275,12 +1286,12 @@ function portTypeLabel(type){
   if(Array.isArray(type))return type.map(portTypeLabel).join(' / ');
   return Object.hasOwn(labels,type)?labels[type]:type||'类型未声明';
 }
-function portSummary(inputs,outputs){
+function portSummary(inputs,outputs,omitTypes=false){
   const group=(label,ports)=>{
     if(!ports)return `<span>${label}待核实</span>`;
     const types=[...new Set(ports.map(port=>portTypeLabel(port.type)))];
     const detail=ports.map(port=>(port.label||port.field||'')+' · '+portTypeLabel(port.type)).join('，');
-    return `<span title="${safe(detail)}">${label} ${ports.length}${types.length?' · '+safe(types.join('、')):''}</span>`;
+    return `<span title="${safe(detail)}">${label} ${ports.length}${!omitTypes&&types.length?' · '+safe(types.join('、')):''}</span>`;
   };
   return `<div class="port-summary">${group('输入',inputs)}${group('输出',outputs)}</div>`;
 }
@@ -1294,8 +1305,9 @@ function declaredPortSummary(entry){
   const settled=entry.verify!=='pending';
   return portSummary(entry.ports.inputs.length?entry.ports.inputs:(settled?[]:null),entry.ports.outputs.length?entry.ports.outputs:(settled?[]:null));
 }
-function portTypeMarkup(port,label){
+function portTypeMarkup(port,label,majority){
   if(label!==undefined&&label===portTypeLabel(port?.type))return '';
+  if(majority!==undefined&&port?.type!==undefined&&port.type===majority)return '';
   const detail=[port?.role?`用途：${port.role}`:'',port?.field?`字段：${port.field}`:'',port?.type?`类型：${port.type}`:''].filter(Boolean).join(' · ');
   return `<small class="port-type"${detail?` title="${safe(detail)}"`:''}>${safe(portTypeLabel(port?.type))}</small>`;
 }
@@ -1460,11 +1472,24 @@ function whaleIssues(node,flow){
   if(catalogMode==='required'&&!connected('url')&&!node.params?.url)return '缺少必填参数：url';
   return '';
 }
-function whaleInput(node,key,schema,simple=false){
-  const value=node.params?.[key];
-  const displayed=typeof value==='object'?JSON.stringify(value):value;
-  return `<input data-whale-param="${key}" aria-label="${safe(whaleFields[key]||key)}" placeholder="${safe(simple?(whaleFields[key]||key):key)}" value="${safe(displayed)}" ${schema.type==='signal'?'disabled':''}>`;
+function fieldControl(node,key,schema,simple=false){
+  const type=schema?.type||'string';
+  const raw=node.params?.[key];
+  const value=typeof raw==='object'?JSON.stringify(raw):(raw??'');
+  const label=whaleFields[key]||key;
+  const note=schema?.description||'';
+  const attrs=`data-whale-param="${key}" aria-label="${safe(label)}" placeholder="${safe(simple?(note||label):key)}"${note?` title="${safe(note)}"`:''}`;
+  const id=`wl-${safe(String(node.id))}-${safe(key)}`;
+  const datalist=key==='workflow'&&Array.isArray(workflowNames)&&workflowNames.length
+    ?`<datalist id="${id}">${workflowNames.map(name=>`<option value="${safe(name)}"></option>`).join('')}</datalist>`:'';
+  if(type==='signal')return `<input type="text" ${attrs} value="" disabled>`;
+  if(type==='boolean')return `<select ${attrs}><option value="">未设置</option><option value="true"${value==='true'?' selected':''}>是</option><option value="false"${value==='false'?' selected':''}>否</option></select>`;
+  if(type==='object'||type==='array')return `<textarea ${attrs} rows="2" spellcheck="false">${safe(value)}</textarea>`;
+  if(type==='integer'||type==='number')return `<input type="number" step="${type==='integer'?'1':'any'}" ${attrs} value="${safe(value)}">`;
+  const list=datalist?` list="${id}"`:'';
+  return `<input type="text" ${attrs}${list} value="${safe(value)}">${datalist}`;
 }
+function whaleInput(node,key,schema,simple=false){return fieldControl(node,key,schema,simple);}
 let workflowNames=null,workflowNamesNote='';
 async function loadWorkflowNames(){
   try{
@@ -1478,14 +1503,6 @@ async function loadWorkflowNames(){
   }
   try{render();}catch(error){}
 }
-function workflowPick(node,value){
-  const current=typeof value==='string'?value:'';
-  if(current.includes('${'))return '';
-  if(workflowNames===null)return '<small class="muted">工作流列表读取中…</small>';
-  if(!workflowNames.length)return `<small class="muted">读不到工作流列表${workflowNamesNote?'：'+safe(workflowNamesNote):''}，可以直接手填</small>`;
-  const options=workflowNames.map(name=>`<option value="${safe(name)}" ${name===current?'selected':''}>${safe(name)}</option>`).join('');
-  return `<select data-workflow-pick aria-label="选择工作流"><option value="">（手选工作流）</option>${options}</select>`;
-}
 function whaleNode(node,tool,view){
   const flow=getFlow(), fields=whaleFieldsFor(tool);
   const inputs=inputPorts(tool),output=outputPort(tool);
@@ -1494,14 +1511,17 @@ function whaleNode(node,tool,view){
   const inventoryFields=tool.inventory?[...new Set([...tool.contract.visibleInputs,...Object.keys(fields)])].slice(0,3):null;
   const shown=[...new Set([...(keyFields[tool.id]||inventoryFields||Object.keys(fields)),...linked])];
   const issue=whaleIssues(node,flow);
+  const tally=new Map();
+  inputs.forEach(port=>{if(port?.type!==undefined)tally.set(port.type,(tally.get(port.type)||0)+1);});
+  const majority=[...tally.entries()].sort((a,b)=>b[1]-a[1])[0]?.[0];
   return `<section data-node-kind="${nodeClass(tool)}" class="node ${view.selected===node.id?'selected':''} ${issue?(catalogMode==='off'?'node-unavailable':'node-invalid'):''}" data-node="${node.id}" style="--node-w:${nodeWidth(tool)}px;left:${node.x}px;top:${node.y}px">
     <div class="node-head"><span class="symbol">◇</span><strong>${safe(tool.name)}</strong>${node.type==='qq_group_output'?'<span class="node-action-tag">发送消息</span>':''}<button data-action="detail" aria-label="节点详情">⋯</button></div>
-    ${portSummary(inputs,output?[output]:[])}
+    ${portSummary(inputs,output?[output]:[],true)}
     ${tool.contract?`<div class="node-meta">${safe(tool.plugin)} · ${tool.contract.danger}${tool.id==='chime_test'?' · 播放声音':''}</div>`:''}
     ${issue?`<div class="node-meta">${safe(issue)}</div>`:''}${contractFor(tool)?`<div class="node-meta" title="静态契约核实状态">${safe(contractConfidence[contractFor(tool).verify])}</div>`:''}
-    ${shown.map(key=>`<div class="port-row"><button class="port in" data-port="in" data-field="${key}" aria-label="连接至 ${safe(whaleFields[key]||key)}" ${!fields[key]||issue==='工具不可用'?'disabled':''}></button>${safe(whaleFields[key]||key)}${portTypeMarkup(inputs.find(port=>port.field===key),whaleFields[key]||key)}</div>${!linked.includes(key)&&fields[key]&&fields[key].type!=='signal'&&tool.contract?whaleInput(node,key,fields[key],true):''}${tool.id==='comfy_generate'&&key==='workflow'&&!linked.includes(key)?workflowPick(node,node.params?.workflow):''}`).join('')}
+    ${shown.map(key=>`<div class="port-row"><button class="port in" data-port="in" data-field="${key}" aria-label="连接至 ${safe(whaleFields[key]||key)}" ${!fields[key]||issue==='工具不可用'?'disabled':''}></button>${safe(whaleFields[key]||key)}${portTypeMarkup(inputs.find(port=>port.field===key),whaleFields[key]||key,majority)}</div>${!linked.includes(key)&&fields[key]&&fields[key].type!=='signal'&&tool.contract?whaleInput(node,key,fields[key],true):''}`).join('')}
     ${['input_text','qq_group_input'].includes(tool.id)?`<input data-param="value" aria-label="示例文本" value="${safe(node.value)}">`:''}
-    ${output?`<div class="port-row out">${safe(output.label)}${portTypeMarkup(output,output.label)}<button class="port out ${view.pending===node.id?'pending':''}" data-port="out" aria-label="连接 ${safe(output.label)}"></button></div>`:''}
+    ${output?`<div class="port-row out">${safe(output.label)}${portTypeMarkup(output,output.label,majority)}<button class="port out ${view.pending===node.id?'pending':''}" data-port="out" aria-label="连接 ${safe(output.label)}"></button></div>`:''}
   ${nodeDeltaMarkup(node)}</section>`;
 }
 function whaleDetails(node,tool,flow){
@@ -2802,6 +2822,39 @@ function textWidth(value){
   for(const ch of String(value??'')) width+=/[\u2e80-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch)?14:8;
   return width;
 }
+const ioFieldTypes=['string','integer','number','boolean','object','array','custom'];
+function ioRow(side){
+  const types=ioFieldTypes.map(type=>`<option value="${type}">${type==='custom'?'自定义':portTypeLabel(type)}</option>`).join('');
+  return `<div class="io-row"><input name="${side}-name" placeholder="字段名" maxlength="24"><select name="${side}-type" aria-label="类型">${types}</select><input name="${side}-custom" placeholder="自定义类型名" maxlength="16"><select name="${side}-required" aria-label="是否必填"><option value="no">可选</option><option value="yes">必填</option></select></div>`;
+}
+function submitRegisterTool(form){
+  const data=new FormData(form);
+  const text=name=>String(data.get(name)||'').trim();
+  const fail=message=>{showDialog('注册工具',`<p>${safe(message)}</p><div class="actions">${closeButton}</div>`);};
+  const name=text('name'),plugin=text('plugin'),category=text('category');
+  if(!name)return fail('工具名称不能空。');
+  if(!plugin||!category)return fail('所属插件和用途都要填。');
+  const readSide=side=>{
+    const names=data.getAll(side+'-name').map(value=>String(value||'').trim());
+    const types=data.getAll(side+'-type').map(value=>String(value||'string'));
+    const customs=data.getAll(side+'-custom').map(value=>String(value||'').trim());
+    const required=data.getAll(side+'-required').map(value=>String(value)==='yes');
+    const fields={},picked=[];
+    names.forEach((key,index)=>{
+      if(!key||fields[key])return;
+      fields[key]={type:types[index]==='custom'?(customs[index]||'string'):types[index]};
+      if(required[index])picked.push(key);
+    });
+    return {fields,required:picked};
+  };
+  const input=readSide('in'),output=readSide('out');
+  const outputName=Object.keys(output.fields)[0]||'';
+  const tool={id:crypto.randomUUID(),name,plugin,category,input:Object.keys(input.fields)[0]||'',output:outputName};
+  if(Object.keys(input.fields).length)tool.schema={type:'object',properties:input.fields,required:input.required};
+  if(outputName)tool.outputSchema={type:output.fields[outputName].type};
+  dialog.close();
+  tools.push(tool);library.query='';library.mode='all';library.filter='';persist();render();
+}
 function nodeWidth(tool){
   const parts=[tool.name,tool.input,tool.output,tool.parameter]
     .concat((inputPorts(tool)||[]).map(port=>port&&(port.label||port.name)))
@@ -2809,9 +2862,22 @@ function nodeWidth(tool){
   const widest=Math.max(0,...parts.map(textWidth));
   return Math.max(210,Math.min(320,Math.ceil((widest+96)/10)*10));
 }
+function customNode(node,tool,view){
+  const fields=tool.schema?.properties||{};
+  const inputs=inputPorts(tool),output=outputPort(tool),flow=getFlow();
+  const linked=flow.edges.filter(([,to])=>to===node.id).map(([, ,field])=>field).filter(Boolean);
+  const majority=inputs.length?inputs[0].type:undefined;
+  return `<section data-node-kind="${nodeClass(tool)}" class="node ${view.selected===node.id?'selected':''}" data-node="${node.id}" style="--node-w:${nodeWidth(tool)}px;left:${node.x}px;top:${node.y}px">
+    <div class="node-head"><span class="symbol">◇</span><strong>${safe(tool.name)}</strong><button data-action="detail" aria-label="节点详情">?</button></div>
+    ${portSummary(inputs,output?[output]:[],true)}
+    ${inputs.map(port=>`<div class="port-row"><button class="port in" data-port="in" data-field="${safe(port.field||'')}" aria-label="连接至 ${safe(port.label)}"></button>${safe(port.label)}${portTypeMarkup(port,port.label,majority)}</div>${port.field&&fields[port.field]&&!linked.includes(port.field)?fieldControl(node,port.field,fields[port.field],true):''}`).join('')}
+    ${output?`<div class="port-row out">${safe(output.label)}${portTypeMarkup(output,output.label,majority)}<button class="port out ${view.pending===node.id?'pending':''}" data-port="out" aria-label="连接 ${safe(output.label)}"></button></div>`:''}
+  ${nodeDeltaMarkup(node)}</section>`;
+}
 function nodeMarkup(node,view){
   const tool=getTool(node.type)||unknownTool(node.type);
   if(tool.whale)return whaleNode(node,tool,view);
+  if(tool.schema&&tool.schema.properties&&Object.keys(tool.schema.properties).length)return customNode(node,tool,view);
   return `<section data-node-kind="${nodeClass(tool)}" class="node ${view.selected===node.id?'selected':''}" data-node="${node.id}" style="--node-w:${nodeWidth(tool)}px;left:${node.x}px;top:${node.y}px"><div class="node-head"><span class="symbol">◇</span><strong>${safe(tool.name)}</strong>${node.type==='qq_group_output'?'<span class="node-action-tag">发送消息</span>':''}<button data-action="detail" aria-label="节点详情">⋯</button></div>${toolPortSummary(tool)}${tool.input?`<div class="port-row"><button class="port in" data-port="in" aria-label="连接至${safe(tool.input)}"></button>${safe(tool.input)}${portTypeMarkup(inputPorts(tool)[0],tool.input)}</div>`:''}${tool.output?`<div class="port-row out">${safe(tool.output)}${portTypeMarkup(outputPort(tool),tool.output)}<button class="port out ${view.pending===node.id?'pending':''}" data-port="out" aria-label="连接${safe(tool.output)}"></button></div>`:''}${tool.parameter?`<input data-param="value" aria-label="${safe(tool.parameter)}" placeholder="${safe(tool.parameter)}" value="${safe(node.value??tool.value)}">`:''}${nodeDeltaMarkup(node)}</section>`;
 }
 function renderSide(flow,view){
@@ -3239,7 +3305,13 @@ document.addEventListener('click',event=>{
     case 'register-flow-pick':pickRegisterFlow(button.dataset.slug);break;
   case 'register-flow-file':document.querySelector('#register-flow-file').click();break;
     case 'register':
-      showDialog('注册工具',`<form id="register-tool" class="dialog-grid"><label>工具名称<input name="name" required maxlength="32"></label><label>所属插件<input name="plugin" required maxlength="32"></label><label>用途<input name="category" required maxlength="24"></label><label>输入名称（可选）<input name="input" maxlength="24"></label><label>输出名称（可选）<input name="output" maxlength="24"></label><div class="actions">${closeButton}<button class="primary">注册</button></div></form>`);break;
+      showDialog('注册工具',`<form id="register-tool" class="dialog-grid">
+        <label>工具名称<input name="name" required maxlength="32"></label>
+        <label>所属插件<input name="plugin" required maxlength="32"></label>
+        <label>用途<input name="category" required maxlength="24"></label>
+        <div class="io-editor"><h4>输入接口</h4><div class="io-rows" data-side="in">${ioRow('in')}</div><button type="button" data-action="io-add" data-side="in">+ 加一个输入</button></div>
+        <div class="io-editor"><h4>输出接口</h4><div class="io-rows" data-side="out">${ioRow('out')}</div><button type="button" data-action="io-add" data-side="out">+ 加一个输出</button></div>
+        <div class="actions">${closeButton}<button class="primary">注册</button></div></form>`);break;
     case 'dismiss':dialog.close();break;
     case 'open-market':{const w=window.open('/market/','_blank','noopener');if(!w)location.href='/market/';break;}
     case 'sync-plugin-library':void syncPluginLibrary();break;
@@ -3329,9 +3401,16 @@ document.addEventListener('keydown',event=>{
   event.preventDefault();
   travelCanvasHistory(flow,key==='y'||event.shiftKey);
 });
+dialog.addEventListener('click',event=>{
+  const button=event.target.closest('[data-action="io-add"]');
+  if(!button)return;
+  const side=button.dataset.side;
+  button.parentElement.querySelector('.io-rows').insertAdjacentHTML('beforeend',ioRow(side));
+});
 dialog.addEventListener('submit',event=>{
   event.preventDefault();
   if(event.target.id==='register-flow'){submitRegisterFlow(event.target);return;}
+  if(event.target.id==='register-tool'){submitRegisterTool(event.target);return;}
   if(event.target.id==='save-canvas'){
     submitCanvasSave(event.target,event.submitter?.value==='new');
     return;
@@ -3909,25 +3988,57 @@ async function wishRequest(path,options){
   if(!response.ok){const error=new Error(data.error||'连接失败');error.status=response.status;throw error;}
   return data;
 }
+const wishSeen=new Set((wishMessages||[]).map(m=>m.id).filter(Boolean));
+let wishSyncTimer=null,wishPaneShown=false,wishResumeHooked=false;
 async function syncRecentChat(){
   if(!wishLive||!wishPanel)return;
-  if(wishMessages.length)return;
   try{
     let session;
     try{session=await wishRequest('/api/session/current');}
     catch(error){if(error.status===401)return;throw error;}
     if(!session||typeof session.id!=='string'||!session.id)return;
-    const page=await wishRequest('/api/session?id='+encodeURIComponent(session.id)+'&limit=2');
+    const page=await wishRequest('/api/session?id='+encodeURIComponent(session.id)+'&limit=40');
     const rows=Array.isArray(page.items)?page.items:[];
-    let synced=0;
+    const pending=new Set();
+    for(const m of wishMessages){
+      if(m.id)continue;
+      pending.add((m.role==='user'?'user':'assistant')+'\u0000'+String(m.text||'').trim());
+    }
+    let added=0;
     for(const row of rows){
+      if(row.role!=='user'&&row.role!=='assistant')continue;
       const text=String(row.text||'').trim();
       if(!text)continue;
-      wishMessages.push({role:row.role==='user'?'user':'assistant',text,synced:true});
-      synced+=1;
+      const role=row.role;
+      const id=typeof row.id==='string'?row.id:'';
+      if(id&&wishSeen.has(id))continue;
+      if(pending.has(role+'\u0000'+text)){if(id)wishSeen.add(id);continue;}
+      wishMessages.push(id?{role,text,synced:true,id}:{role,text,synced:true});
+      if(id)wishSeen.add(id);
+      added+=1;
     }
-    if(synced){drawWish();updateWishLauncher();}
+    if(added){drawWish();updateWishLauncher();}
   }catch(error){console.warn('同步主窗口最近消息失败：',error.message);}
+}
+function wishPaneVisible(){
+  if(!wishPanel||wishPanel.hidden)return false;
+  return wishPanel.getClientRects().length>0;
+}
+function startWishSync(){
+  if(wishSyncTimer)clearInterval(wishSyncTimer);
+  if(wishResumeHooked)return;
+  wishResumeHooked=true;
+  const kick=()=>{
+    const shown=document.visibilityState==='visible'&&wishPaneVisible();
+    if(!shown){wishPaneShown=false;return;}
+    if(wishPaneShown)return;
+    wishPaneShown=true;
+    void syncRecentChat();
+  };
+  document.addEventListener('visibilitychange',kick);
+  if(window.MutationObserver&&wishPanel)
+    new MutationObserver(kick).observe(wishPanel,{attributes:true,attributeFilter:['hidden','class']});
+  kick();
 }
 async function wishAgent(text,kind,onChunk){
   let session;
@@ -4162,6 +4273,7 @@ function initWish(){
   const status=wishPanel.querySelector('#wish-status');
   status.textContent=wishLive?'连接本机 WhaleLife · 使用当前会话':'当前为网页模拟';
   void syncRecentChat();
+  startWishSync();
   wishPanel.querySelector('#wish-connection').hidden=wishLive;
   wishPanel.querySelector('#wish-password-row').hidden=true;
   wishHeader.onsubmit=event=>{
@@ -4171,6 +4283,22 @@ function initWish(){
     else showWish();
   };
   wishPanel.querySelector('#wish-close').onclick=()=>{wishDockExpanded=false;wishPanel.hidden=true;wishHeader.querySelector('input').focus();};
+{
+  const syncBtn=wishPanel.querySelector('#wish-sync');
+  if(syncBtn)syncBtn.onclick=async()=>{
+    if(syncBtn.disabled)return;
+    const label=syncBtn.textContent;
+    syncBtn.disabled=true;syncBtn.textContent='刷新中…';
+    try{
+      if(!wishLive)throw Error('当前是网页模拟，没有可同步的宿主');
+      await syncRecentChat();
+      syncBtn.textContent='已刷新';
+    }catch(error){
+      syncBtn.textContent=error&&error.message?String(error.message).slice(0,12):'失败';
+    }
+    setTimeout(()=>{syncBtn.textContent=label;syncBtn.disabled=false;},900);
+  };
+}
   wishPanel.querySelector('#wish-apply').onclick=applyWishDraft;
   wishPanel.querySelector('#wish-dock').onclick=dockWish;
   wishPanel.querySelector('#wish-attach').onclick=toggleWishContext;
