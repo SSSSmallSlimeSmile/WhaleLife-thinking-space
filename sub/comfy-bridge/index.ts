@@ -275,11 +275,12 @@ export async function apply(ctx: Context) {
   }
 
   /** 工作流清单由生图插件给：这边只读它公开的服务，不碰它的目录。 */
-  function readWorkflows(): Workflow[] {
+  async function readWorkflows(): Promise<Workflow[]> {
     const service = assetsOf();
     if (!service) return [];
     try {
-      return service.listWorkflows()
+      const rawWf = await service.listWorkflows();
+      return (Array.isArray(rawWf) ? rawWf : [])
         .filter((item) => item && typeof item.name === "string")
         .map((item) => ({ name: item.name, size: Number(item.size ?? 0), mtime: String(item.mtime ?? "") }))
         .sort((a, b) => a.name.localeCompare(b.name));
@@ -320,14 +321,14 @@ export async function apply(ctx: Context) {
   }
 
   /** 把包摊开：几个节点、用什么工具、提示词写什么、要哪个工作流。 */
-  function readCanvasFlows(workflowNames: Set<string>, registered: Set<string>, imports: Imports): CanvasFlow[] {
+  async function readCanvasFlows(workflowNames: Set<string>, registered: Set<string>, imports: Imports): Promise<CanvasFlow[]> {
     // 两处来源：生图插件那边（ComfyUI 导出的）和本插件自己收的（别的软件推来的）。
     // 提供方停用时，后者仍然列得出来——手动导入不依赖 comfy。
     const list: { slug: string; size: number; mtime: string; text: string }[] = [...readImported()];
     const service = assetsOf();
     if (service) {
       try {
-        const raw: any = service.listFlows();
+        const raw: any = await service.listFlows();
         // 跨进程拿回来的可能是镜像对象而不是真数组；不是数组就当没有。
         for (const entry of Array.isArray(raw) ? raw : []) {
           if (!list.some((item) => item.slug === entry.slug)) list.push(entry);
@@ -379,9 +380,9 @@ export async function apply(ctx: Context) {
     const imports = await readImports();
     const has = installed();
     const ready = toolReady();
-    const workflows = readWorkflows();
+    const workflows = await readWorkflows();
     const workflowNames = new Set(workflows.map((w) => w.name));
-    const allFlows = readCanvasFlows(workflowNames, registeredFlowIds(), imports);
+    const allFlows = await readCanvasFlows(workflowNames, registeredFlowIds(), imports);
     const flows = settings.strict ? allFlows.filter((flow) => !flow.problems.length) : allFlows;
     const rejected = allFlows.length - flows.length;
     const broken = flows.filter((flow) => flow.missingWorkflows.length);
@@ -635,7 +636,7 @@ export async function apply(ctx: Context) {
     // 先删本插件自己收的，再问生图插件那边。
     let removed = deleteImported(slug);
     try {
-      if (!removed && service) removed = service.deleteFlow(slug);
+      if (!removed && service) removed = await service.deleteFlow(slug);
     } catch (error) {
       res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("删除失败：" + String(error));
