@@ -7,8 +7,14 @@ function argOf(name) {
   return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : '';
 }
 const parentPid = Number(argOf('--parent-pid') || 0);
-const port = Number(argOf('--port') || process.env.WORKBENCH_PORT || 9281);
-const upstream = Number(argOf('--upstream') || process.env.WORKBENCH_WHALE_PORT || 9270);
+const rawPort = String(argOf('--port') || process.env.WORKBENCH_PORT || '').trim();
+const rawUpstream = String(argOf('--upstream') || process.env.WORKBENCH_WHALE_PORT || '').trim();
+if (!rawPort || !rawUpstream) {
+  console.error('缺少端口参数：画布没有默认端口。必须显式给 --port <端口> --upstream <宿主端口>。');
+  process.exit(2);
+}
+const port = Number(rawPort);
+const upstream = Number(rawUpstream);
 if (![port, upstream].every(value => Number.isInteger(value) && value > 0 && value <= 65535) || port === upstream) {
   throw new Error('请选择两个不同的有效端口。');
 }

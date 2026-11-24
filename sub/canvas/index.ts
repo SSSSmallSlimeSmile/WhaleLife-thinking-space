@@ -35,8 +35,11 @@ const settingsPath = "/plugins/thinking-space/canvas/settings";
 const scriptName = "whalelife-workbench.cjs";
 
 const DEFAULTS = {
-  /** 画布自己监听的端口。宿主端口不能和它一样。 */
-  port: 9281,
+  /**
+   * 画布自己监听的端口。宿主端口不能和它一样。
+   * 不给默认值：端口由用户在设置页显式填写，没填就不启动（原因见 README「端口」一节）。
+   */
+  port: 0,
   /** 空着就用插件目录里那份脚本。 */
   canvasScript: "",
   /** 思维空间停掉时，画布进程一起收掉。默认开。 */
@@ -122,7 +125,7 @@ export async function apply(ctx: Context) {
       const port = Math.floor(Number(saved?.port));
       const script = typeof saved?.canvasScript === "string" ? saved.canvasScript.trim() : "";
       cfg = {
-        port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULTS.port,
+        port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : 0,
         canvasScript: script,
         stopWithSpace: saved?.stopWithSpace !== false,
         ownerToken: typeof saved?.ownerToken === "string" ? saved.ownerToken.trim() : "",
@@ -224,6 +227,7 @@ export async function apply(ctx: Context) {
       pid,
       owned: pid ? await isOurs(pid) : false,
       port: cfg.port,
+      portSet: cfg.port > 0,
       upstreamUrl: cfg.upstreamUrl,
       upstreamPort: upstreamPort(),
       script: locateScript(),
@@ -247,6 +251,10 @@ export async function apply(ctx: Context) {
     const script = locateScript();
     if (!script) { canvasError = "找不到画布脚本：插件目录里没有 " + scriptName + "，也没在设置里指定路径。"; return canvasError; }
     if (!existsSync(script)) { canvasError = `找不到脚本：${script}`; return canvasError; }
+    if (!(cfg.port > 0)) {
+      canvasError = "还没设画布端口：在下面的设置里填一个（例如 9281，不能和宿主端口相同）再启动。端口没有默认值，没填就不起画布。";
+      return canvasError;
+    }
     const upstream = upstreamPort();
     if (!cfg.upstreamUrl || upstream === null) {
       canvasError = "还没设宿主地址：在下面的设置里填这台宿主的地址（例如 http://127.0.0.1:9270）再启动。地址没配就不起画布，免得连到别的实例上。";
@@ -347,7 +355,7 @@ export async function apply(ctx: Context) {
     return html("思维画布", `${note ? `<p class="notice">${escape(note)}</p>` : ""}
 <section class="panel">
   <h2>状态</h2>
-  <p><span class="badge${current.running ? "" : " warn"}">${current.running ? `运行中 · PID ${current.pid}` : "没在跑"}</span><span class="badge">端口 ${current.port}</span><span class="badge">连宿主 ${current.upstreamUrl || "没设"}</span>${current.running ? `<span class="badge${current.owned ? "" : " warn"}">${current.owned ? "本实例启动" : "别的实例/外部进程"}</span>` : ""}</p>
+  <p><span class="badge${current.running ? "" : " warn"}">${current.running ? `运行中 · PID ${current.pid}` : "没在跑"}</span><span class="badge${current.portSet ? "" : " warn"}">端口 ${current.portSet ? current.port : "没设"}</span><span class="badge">连宿主 ${current.upstreamUrl || "没设"}</span>${current.running ? `<span class="badge${current.owned ? "" : " warn"}">${current.owned ? "本实例启动" : "别的实例/外部进程"}</span>` : ""}</p>
   <p class="muted">画布是独立的 node 脚本，开机不会自己起来。要用的时候点启动，不用了点停止。${current.error ? `上次出错：${escape(current.error)}` : ""}</p>
   <p class="muted">脚本：<code>${escape(current.script || "（没找到）")}</code></p>
   <p>
@@ -360,8 +368,8 @@ export async function apply(ctx: Context) {
   <h2>设置</h2>
   <form method="post" action="${settingsPath}">
     <div class="field">画布端口</div>
-    <input type="number" name="port" min="1024" max="65535" value="${current.port}">
-    <p class="muted" style="margin-top:6px">默认 9281。不能和宿主端口相同，改完要重启画布才生效。</p>
+    <input type="number" name="port" min="1024" max="65535" required value="${current.portSet ? current.port : ""}" placeholder="例如 9281">
+    <p class="muted" style="margin-top:6px">必填，没有默认值。不能和宿主端口相同，改完要重启画布才生效。</p>
 
     <div class="field">宿主地址</div>
     <input type="text" name="upstreamUrl" id="upstreamUrl" value="${escape(cfg.upstreamUrl)}" placeholder="http://127.0.0.1:9270">
@@ -413,7 +421,13 @@ export async function apply(ctx: Context) {
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
       const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
       const rawPort = Math.floor(Number(form.get("port")));
-      const nextPort = Number.isInteger(rawPort) && rawPort >= 1024 && rawPort <= 65535 ? rawPort : cfg.port;
+      if (!(Number.isInteger(rawPort) && rawPort >= 1024 && rawPort <= 65535)) {
+        note = "画布端口要填 1024–65535 之间的整数，这次没存。端口没有默认值。";
+        res.writeHead(303, { Location: pagePath + "?note=" + encodeURIComponent(note) });
+        res.end();
+        return;
+      }
+      const nextPort = rawPort;
       const script = String(form.get("canvasScript") ?? "").trim().slice(0, 500);
       const stopWithSpace = form.get("stopWithSpace") === "on";
       const rawUrl = String(form.get("upstreamUrl") ?? "").trim();
@@ -434,5 +448,5 @@ export async function apply(ctx: Context) {
     res.end();
   });
 
-  ctx.logger.info(`思维画布：端口 ${cfg.port}，连宿主 ${cfg.upstreamUrl || "（没设）"}，随思维空间停止 ${cfg.stopWithSpace ? "开" : "关"}`);
+  ctx.logger.info(`思维画布：端口 ${cfg.port || "（没设）"}，连宿主 ${cfg.upstreamUrl || "（没设）"}，随思维空间停止 ${cfg.stopWithSpace ? "开" : "关"}`);
 }
