@@ -373,6 +373,9 @@ export async function apply(ctx: Context) {
         try {
           dispose();
           disposed = true;
+          // 句柄留在表里，页面就会以为工具还在；回滚注册失败时更是两边说法打架。
+          // 注册成功的路径会重新 set 回来，所以这里摘掉不会丢句柄。
+          disposers.delete(skillId);
         } catch (error) {
           // 注销不掉就别删。回执说「已删除、工具当场注销」而工具还在，
           // 比不删更坏——页面以为没了，工具表里还挂着入口。
@@ -385,17 +388,21 @@ export async function apply(ctx: Context) {
       } catch (error) {
         // 写盘没成：内存和工具表都退回去，不能让页面显示删了、重载又冒出来。
         store.items.splice(idx, 0, removed);
+        let extra = "";
         if (disposed) {
           try {
             disposers.set(skillId, registerShell(removed));
           } catch (again) {
-            // 记录还在、工具没了：两边不一致，得说出来，不能只报原来的写盘错误。
-            lastNote = `${removed.toolName} 注销后重新注册失败，工具暂时不在：${again instanceof Error ? again.message : String(again)}。删掉重加一次就行。`;
+            // 记录还在、工具没了：两边不一致，得说出来，而且要说在这条回执里，
+            // 不能只挂在 lastNote 上——带参数的跳转页会把它遮住。
+            const why = again instanceof Error ? again.message : String(again);
+            lastNote = `${removed.toolName} 注销后重新注册失败，工具暂时不在：${why}。删掉重加一次就行。`;
+            extra = `；另外注销后重新注册也失败了，工具暂时不在（${why}），删掉重加一次就行`;
           }
         } else if (dispose) {
           disposers.set(skillId, dispose);
         }
-        throw error;
+        throw new Error((error instanceof Error ? error.message : String(error)) + extra);
       }
       if (disposed) disposers.delete(skillId);
       return true;
@@ -441,7 +448,11 @@ export async function apply(ctx: Context) {
   <td><code>${escape(item.skillId)}</code><div class="muted">${escape(item.label)}</div></td>
   <td><code>${escape(item.toolName)}</code></td>
   <td><span class="badge${item.danger === "safe" ? "" : " warn"}">${escape(item.danger)}</span></td>
-  <td>${item.enabled ? '<span class="badge ok">已注册</span>' : '<span class="badge warn">已关</span>'}
+  <td>${!item.enabled
+    ? '<span class="badge warn">已关</span>'
+    : disposers.has(item.skillId)
+      ? '<span class="badge ok">已注册</span>'
+      : '<span class="badge warn">已保存 · 工具不在</span>'}
     ${missing ? '<span class="badge warn">技能已不在</span>' : ""}
     ${drift ? `<span class="badge warn">rev ${item.skillRevision}→${nowRev}</span>` : ""}</td>
   <td><form method="post" action="${apiBase}remove" style="margin:0"><input type="hidden" name="skillId" value="${escape(item.skillId)}"><button class="danger" type="submit">删除壳</button></form></td>
@@ -565,6 +576,13 @@ ${notice}
           throw error;
         }
         syncRegistrations();
+        // 记录写进去了不等于工具挂上了。注册失败时不能回「现在就出现在工具表里了」。
+        if (!disposers.has(shell.skillId)) {
+          return {
+            note: `记录已保存，但工具 ${shell.toolName} 没注册上：${lastNote || "原因不明"}。修好后重载一次插件，或删掉重加。`,
+            tone: "bad" as const,
+          };
+        }
         const count = Array.isArray(skill.params) ? skill.params.length : 0;
         return { note: `已加壳：工具 ${shell.toolName} 现在就出现在工具表里了（带 ${count} 个参数）。`, tone: "ok" as const };
       });

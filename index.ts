@@ -1030,10 +1030,10 @@ const toolsSafe = async (): Promise<any[]> => {
 const stricterDanger = (a: unknown, b: unknown): string | undefined => {
   const ia = dangers.indexOf(a as Danger);
   const ib = dangers.indexOf(b as Danger);
-  const unknown = (a !== undefined && ia < 0) || (b !== undefined && ib < 0);
   const known = [ia, ib].filter(i => i >= 0);
-  if (unknown) return dangers[Math.max(known.length ? Math.max(...known) : 0, 1)];
-  return known.length ? dangers[Math.max(...known)] : undefined;
+  // 两侧都认得出才敢取严；有一侧是 undefined 或坏值，就当「不知道多危险」，至少 ask。
+  if (known.length !== 2) return dangers[Math.max(known.length ? Math.max(...known) : 0, 1)];
+  return dangers[Math.max(...known)];
 };
 
 const catalogByName = async () => {

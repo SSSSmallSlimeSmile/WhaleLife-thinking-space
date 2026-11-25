@@ -20,11 +20,13 @@ const check = (label, ok, extra = "") => {
 
 function makeCtx({ disk = { schemaVersion: 1, items: [] }, failSave = () => false, disposeThrows = false } = {}) {
   const routes = new Map();
+  const pages = new Map();
   let saved = JSON.parse(JSON.stringify(disk));
   const registered = new Map();
   const state = {
     saveFails: failSave,
     disposeThrows,
+    registerThrows: false,
     get saved() {
       return saved;
     },
@@ -48,6 +50,7 @@ function makeCtx({ disk = { schemaVersion: 1, items: [] }, failSave = () => fals
     get: (name) => (name === "thinking-space.skills" ? { describe: async () => skills } : undefined),
     tools: {
       register: (tool) => {
+        if (state.registerThrows) throw new Error("register denied");
         registered.set(tool.name, tool);
         return () => {
           if (state.disposeThrows) throw new Error("注销失败：句柄已失效");
@@ -59,10 +62,13 @@ function makeCtx({ disk = { schemaVersion: 1, items: [] }, failSave = () => fals
         return { ok: true, result: { status: "ok", runId: "r1", steps: [{}] } };
       },
     },
-    web: { page: () => {}, api: (path, handler) => routes.set(path, handler) },
+    web: {
+      page: (path, handler) => pages.set(path, handler),
+      api: (path, handler) => routes.set(path, handler),
+    },
     logger: { info() {}, warn() {}, error() {} },
   };
-  return { ctx, routes, state };
+  return { ctx, routes, pages, state };
 }
 
 async function post(route, body) {
@@ -136,6 +142,54 @@ async function post(route, body) {
     await page({ url: "/plugins/thinking-space/shells/" }, { writeHead() {}, end(c) { html += String(c ?? ""); } });
   }
   check("注销失败后工具没被当成已注销", built.state.registered.includes("skill_one"), built.state.registered.join(","));
+}
+
+// 5. 记录存下了但工具没注册上：回执不能说「现在就出现在工具表里了」。
+{
+  const built = makeCtx();
+  await mod.apply(built.ctx);
+  built.state.registerThrows = true;
+  const add = [...built.routes.entries()].find(([p]) => p.endsWith("add"))[1];
+  const r = await post(add, "skillId=skill_one");
+  check("注册失败时回执是失败", /tone=bad/.test(r.location), r.location);
+  check("注册失败时明说没注册上", /没注册上/.test(r.location), r.location);
+  check("注册失败时磁盘仍有记录（等重加）", built.state.saved.items.length === 1, String(built.state.saved.items.length));
+  check("注册失败时工具表为空", built.state.registered.length === 0, built.state.registered.join(","));
+}
+
+// 6. 删除：注销成功、写盘失败、重新注册又失败 —— 这条回执本身要带上「工具暂时不在」。
+{
+  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "ask", requiredPermission: "ask", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
+  const built = makeCtx({ disk });
+  await mod.apply(built.ctx);
+  built.state.saveFails = () => true;
+  built.state.registerThrows = true;
+  const remove = [...built.routes.entries()].find(([p]) => p.endsWith("remove"))[1];
+  const r = await post(remove, "skillId=skill_one");
+  check("回滚二次失败：回执带「工具暂时不在」", /工具暂时不在/.test(r.location), r.location);
+  check("回滚二次失败：磁盘记录还在", built.state.saved.items.length === 1, String(built.state.saved.items.length));
+}
+
+// 7. 删除回滚二次失败后，页面徽章不能还写「已注册」——工具表里已经没有它了。
+{
+  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "ask", requiredPermission: "ask", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
+  const built = makeCtx({ disk });
+  await mod.apply(built.ctx);
+  built.state.saveFails = () => true;
+  built.state.registerThrows = true;
+  const remove = [...built.routes.entries()].find(([p]) => p.endsWith("remove"))[1];
+  await post(remove, "skillId=skill_one");
+  // 跟随那条真实重定向：note/tone 从 URL 带过来，页面要同时说清「没删成」和「工具不在」。
+  const pageHandler = [...built.pages.values()][0];
+  const req = { url: "/?tone=bad&note=" + encodeURIComponent("没删成：EACCES"), method: "GET" };
+  let body = "";
+  const res = {
+    writeHead() {},
+    end(chunk) { body += String(chunk ?? ""); },
+  };
+  await pageHandler(req, res);
+  check("页面同时显示回执和工具不在", /没删成/.test(body) && /工具不在/.test(body), body.slice(0, 0));
+  check("页面不再标「已注册」", !/已注册/.test(body), "");
 }
 
 const failed = results.filter((r) => !r.ok).length;
