@@ -66,6 +66,7 @@ const approvalLabel = "legacy approval alone triggers a save that removes approv
 const fullLabel = "registered shell preserves full read from disk";
 const gateLabel = (order) => "catalog [" + order + "] stops at side-effect confirmation";
 const callsLabel = (order) => "catalog [" + order + "] calls the step tool zero times";
+const confirmLabel = (order) => "catalog [" + order + "] runs the step tool once when confirmed";
 
 async function runSuite(parent, shells) {
   const failed = [];
@@ -125,13 +126,13 @@ async function runSuite(parent, shells) {
     check("valid safe shell registers as safe", b.tool?.danger === "safe", b.tool?.danger);
   }
 
-  async function runSpace(order) {
+  async function runSpace(order, extra = {}) {
     const b = makeCtx({
       files: { "skills.json": { schemaVersion: 1, skills: [skill] } },
       catalog: order.map(danger => ({ name: stepTool, plugin: "test", danger })),
     });
     await parent.apply(b.ctx);
-    const out = await b.tools.get("space_run").run({ id: skillId }, { permission: "full" });
+    const out = await b.tools.get("space_run").run({ id: skillId, ...extra }, { permission: "full" });
     return { out, stepCalls: b.calls.filter(name => name === stepTool).length };
   }
 
@@ -140,6 +141,10 @@ async function runSuite(parent, shells) {
     check(gateLabel(order), out?.status === "blocked" &&
       /含副作用步骤.*需要 confirmSideEffects:true/.test(out.error), out);
     check(callsLabel(order), stepCalls === 0, stepCalls);
+
+    // Confirming the same chain must go through: a stricter danger is a gate, not a permanent block.
+    const confirmed = await runSpace(order, { confirmSideEffects: true });
+    check(confirmLabel(order), confirmed.out?.status === "ok" && confirmed.stepCalls === 1, confirmed);
   }
 
   const safe = await runSpace(["safe", "safe"]);
@@ -164,6 +169,13 @@ const mutations = [
     before: 'item.danger === "full" || item.danger === "safe" ? item.danger : "ask"',
     after: 'item.danger === "safe" ? item.danger : "ask"',
     expected: [fullLabel],
+  },
+  {
+    name: "require confirmation even after the caller confirms",
+    file: parentFile,
+    before: "if (sideEffects && args?.confirmSideEffects !== true)",
+    after: "if (sideEffects)",
+    expected: [confirmLabel(["full", "safe"]), confirmLabel(["safe", "full"])],
   },
   {
     name: "overwrite duplicate catalog entries with the last entry",
