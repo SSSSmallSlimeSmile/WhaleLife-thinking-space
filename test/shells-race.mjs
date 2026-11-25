@@ -125,9 +125,11 @@ async function post(route, body) {
   const built = makeCtx({ disk });
   await mod.apply(built.ctx);
   built.state.disposeThrows = true;
-  // 删掉记录 → 注销抛错 → 走 syncRegistrations 的失败分支
+  // 注销不掉就别删：回执报失败、磁盘留着、工具还在，三边一致。
   const remove = [...built.routes.entries()].find(([p]) => p.endsWith("remove"))[1];
-  await post(remove, "skillId=skill_one");
+  const r = await post(remove, "skillId=skill_one");
+  check("注销失败时回执是失败", /没删成|注销/.test(r.location), r.location);
+  check("注销失败时磁盘记录还在", built.state.saved.items.length === 1, String(built.state.saved.items.length));
   const page = [...built.routes.entries()].find(([p]) => p.includes("shells") && p.endsWith("/"))?.[1];
   let html = "";
   if (page) {

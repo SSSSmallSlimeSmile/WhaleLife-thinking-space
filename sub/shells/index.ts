@@ -370,7 +370,14 @@ export async function apply(ctx: Context) {
       const dispose = disposers.get(skillId);
       let disposed = false;
       if (dispose) {
-        try { dispose(); disposed = true; } catch { /* 注销失败先留着，写盘成功再处理 */ }
+        try {
+          dispose();
+          disposed = true;
+        } catch (error) {
+          // 注销不掉就别删。回执说「已删除、工具当场注销」而工具还在，
+          // 比不删更坏——页面以为没了，工具表里还挂着入口。
+          throw new Error("注销这个壳的工具失败，没有删除：" + (error instanceof Error ? error.message : String(error)));
+        }
       }
       store.items.splice(idx, 1);
       try {
