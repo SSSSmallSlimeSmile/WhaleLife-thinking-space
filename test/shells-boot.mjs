@@ -1,140 +1,223 @@
-// 冷启动归一 + 同名工具取严。两条都是作者挑过的方向：
-// 「危险等级会往 safe 滑」和「重载/冷重启之后照旧」。
-import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-import { Readable } from "node:stream";
+// Run with Node 24+. Add --mutate to verify that each regression fails its target assertion.
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync, writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const shellUrl = new URL("../sub/shells/index.ts", import.meta.url);
-const mod = await import(pathToFileURL(shellUrl.pathname.replace(/^\/([A-Za-z]:)/, "$1")).href);
+const adjacentRoot = fileURLToPath(new URL("../", import.meta.url));
+const repo = existsSync(join(adjacentRoot, "sub", "shells", "index.ts"))
+  ? adjacentRoot
+  : "K:/Github/thinking-space-test";
+const parentFile = "index.ts";
+const shellFile = join("sub", "shells", "index.ts");
+const entryFiles = [parentFile, shellFile];
 
-const results = [];
-const check = (label, ok, extra = "") => {
-  results.push({ label, ok });
-  console.log(`${ok ? "PASS" : "FAIL"}  ${label}${extra ? "  — " + extra : ""}`);
+const skillId = "skill_one";
+const stepTool = "boot_probe";
+const skill = {
+  id: skillId, name: "Boot probe", description: "", kind: "single",
+  danger: "safe", revision: 1, stepCount: 1, params: [],
+  steps: [{ id: "s1", tool: stepTool, plugin: "test", params: {}, next: null }],
+};
+const shell = {
+  skillId, toolName: skillId, label: skill.name, danger: "ask",
+  skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z",
 };
 
-function makeCtx({ disk = { schemaVersion: 1, items: [] }, skills = [{ id: "skill_one", name: "一号", kind: "single", danger: "ask", revision: 1, stepCount: 1, params: [] }] } = {}) {
-  let saved = JSON.parse(JSON.stringify(disk));
-  const registered = new Map();
-  const state = {
-    lastTool: undefined,
-    get saved() { return saved; },
-    get registered() { return [...registered.keys()]; },
-  };
+function makeCtx({ files = {}, skills = [], catalog = [] } = {}) {
+  const saved = new Map(Object.entries(structuredClone(files)));
+  const writes = [];
+  const tools = new Map();
+  const calls = [];
   const ctx = {
-    config: {
-      read: async () => JSON.parse(JSON.stringify(saved)),
-      save: async (_file, value) => { saved = JSON.parse(JSON.stringify(value)); },
-    },
-    get: (name) => (name === "thinking-space.skills" ? { describe: async () => skills } : undefined),
+    config: Object.assign(
+      (file) => structuredClone(saved.get(file) ?? {}),
+      {
+        read: async (file) => structuredClone(saved.get(file) ?? {}),
+        save: async (file, value) => {
+          writes.push(file);
+          saved.set(file, structuredClone(value));
+        },
+      },
+    ),
+    get: (name) => name === "thinking-space.skills" ? { describe: async () => skills } : undefined,
+    provide() {},
+    on: () => () => {},
     tools: {
-      register: (tool) => { registered.set(tool.name, tool); state.lastTool = tool; return () => registered.delete(tool.name); },
-      call: async (name) => (name === "space_skills" ? { ok: true, result: { skills } } : { ok: true, result: {} }),
+      register(tool) {
+        tools.set(tool.name, tool);
+        return () => tools.delete(tool.name);
+      },
+      catalog: async () => catalog,
+      async call(name) {
+        calls.push(name);
+        return { ok: true, result: { done: true } };
+      },
     },
-    web: { page: () => {}, api: () => {} },
+    web: { page() {}, api() {} },
     logger: { info() {}, warn() {}, error() {} },
   };
-  return { ctx, state };
+  return { ctx, saved, writes, tools, calls };
 }
 
-// 1. 脏记录冷启动：danger 是坏值、缺 requiredPermission、还残留 approval。
-{
-  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "bogus", approval: "full", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
-  const b = makeCtx({ disk });
-  await mod.apply(b.ctx);
-  const it = b.state.saved.items[0] ?? {};
-  check("冷启动：坏 danger 归一成 ask", it.danger === "ask", String(it.danger));
-  check("冷启动：缺 requiredPermission 按技能补成 ask", it.requiredPermission === "ask", String(it.requiredPermission));
-  check("冷启动：旧 approval 字段被清掉", it.approval === undefined, String(it.approval));
-  check("冷启动：工具注册上了", b.state.registered.includes("skill_one"), b.state.registered.join(","));
+const approvalLabel = "legacy approval alone triggers a save that removes approval";
+const fullLabel = "registered shell preserves full read from disk";
+const gateLabel = (order) => "catalog [" + order + "] stops at side-effect confirmation";
+const callsLabel = (order) => "catalog [" + order + "] calls the step tool zero times";
+
+async function runSuite(parent, shells) {
+  const failed = [];
+  let passed = 0;
+  function check(label, ok, actual) {
+    if (ok) passed += 1;
+    else failed.push(label);
+    console.log((ok ? "PASS  " : "FAIL  ") + label + (ok ? "" : " — " + JSON.stringify(actual)));
+  }
+
+  async function boot(fields, skills) {
+    const b = makeCtx({ files: { "shells.json": { schemaVersion: 1, items: [{ ...shell, ...fields }] } }, skills });
+    await shells.apply(b.ctx);
+    return { ...b, tool: b.tools.get(skillId), item: b.saved.get("shells.json").items[0] };
+  }
+
+  {
+    // Both permission fields are already valid, so only approval can trigger a save.
+    const b = await boot({ requiredPermission: "ask", approval: "full" }, [{ ...skill, danger: "ask" }]);
+    check(approvalLabel, b.writes.length === 1 && b.writes[0] === "shells.json" &&
+      b.item && !Object.hasOwn(b.item, "approval"), { writes: b.writes, item: b.item });
+  }
+
+  {
+    const b = await boot({ danger: "bogus", requiredPermission: "bogus" });
+    check("invalid stored danger registers as ask", b.tool?.danger === "ask", b.tool?.danger);
+    const out = await b.tool?.run({}, { permission: "full" });
+    check("invalid stored permission blocks before consulting the current skill",
+      out?.status === "blocked" && /壳记录里没有技能的权限声明/.test(out.note), out);
+    check("invalid stored permission never forwards to space_run", !b.calls.includes("space_run"), b.calls);
+  }
+
+  {
+    // A valid permission prevents backfill from masking a read-time downgrade.
+    const b = await boot({ danger: "full", requiredPermission: "full" }, [{ ...skill, danger: "full" }]);
+    check(fullLabel, b.tool?.danger === "full", b.tool?.danger);
+  }
+
+  {
+    const b = await boot({ danger: "ask" }, [{ ...skill, danger: "full" }]);
+    check("missing stored permission is backfilled and saved as full",
+      b.writes.includes("shells.json") && b.item?.requiredPermission === "full" && b.item?.danger === "full",
+      { writes: b.writes, item: b.item });
+    check("permission backfill registers the repaired full danger", b.tool?.danger === "full", b.tool?.danger);
+  }
+
+  {
+    const b = await boot({ danger: "safe", requiredPermission: "safe" });
+    const out = await b.tool?.run({}, { permission: "full" });
+    check("valid stored permission blocks when the current skill is missing",
+      out?.status === "blocked" && /读不到当前技能的权限声明/.test(out.note), out);
+    check("missing current skill never forwards to space_run", !b.calls.includes("space_run"), b.calls);
+  }
+
+  {
+    const b = await boot({ danger: "safe", requiredPermission: "safe" }, [skill]);
+    check("valid safe shell registers as safe", b.tool?.danger === "safe", b.tool?.danger);
+  }
+
+  async function runSpace(order) {
+    const b = makeCtx({
+      files: { "skills.json": { schemaVersion: 1, skills: [skill] } },
+      catalog: order.map(danger => ({ name: stepTool, plugin: "test", danger })),
+    });
+    await parent.apply(b.ctx);
+    const out = await b.tools.get("space_run").run({ id: skillId }, { permission: "full" });
+    return { out, stepCalls: b.calls.filter(name => name === stepTool).length };
+  }
+
+  for (const order of [["full", "safe"], ["safe", "full"]]) {
+    const { out, stepCalls } = await runSpace(order);
+    check(gateLabel(order), out?.status === "blocked" &&
+      /含副作用步骤.*需要 confirmSideEffects:true/.test(out.error), out);
+    check(callsLabel(order), stepCalls === 0, stepCalls);
+  }
+
+  const safe = await runSpace(["safe", "safe"]);
+  check("catalog [safe,safe] runs the step tool once",
+    safe.out?.status === "ok" && safe.stepCalls === 1, safe);
+
+  console.log(passed + " PASS / " + failed.length + " FAIL");
+  return failed;
 }
 
-// 2. 旧记录存的是 full、技能也声明 full：补回 full，不往上也不往下抹。
-{
-  const skills = [{ id: "skill_one", name: "一号", kind: "single", danger: "full", revision: 1, stepCount: 1, params: [] }];
-  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "full", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
-  const b = makeCtx({ disk, skills });
-  await mod.apply(b.ctx);
-  const it = b.state.saved.items[0] ?? {};
-  check("冷启动：full 记录按技能补成 full", it.danger === "full" && it.requiredPermission === "full", `${it.danger}/${it.requiredPermission}`);
-}
+const mutations = [
+  {
+    name: "skip the save triggered solely by leftover approval",
+    file: shellFile,
+    before: "let patched = strippedLegacyApproval;",
+    after: "let patched = false;",
+    expected: [approvalLabel],
+  },
+  {
+    name: "downgrade stored full danger to ask on read",
+    file: shellFile,
+    before: 'item.danger === "full" || item.danger === "safe" ? item.danger : "ask"',
+    after: 'item.danger === "safe" ? item.danger : "ask"',
+    expected: [fullLabel],
+  },
+  {
+    name: "overwrite duplicate catalog entries with the last entry",
+    file: parentFile,
+    before: "map.set(tool.name, prev ? { ...tool, danger: stricterDanger(prev.danger, tool.danger) } : tool);",
+    after: "map.set(tool.name, tool);",
+    expected: [gateLabel(["full", "safe"]), callsLabel(["full", "safe"])],
+  },
+];
 
-// 3. 技能声明读不到：不能猜 safe，权限留空（运行时照旧拦），工具仍注册。
-{
-  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "bogus", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
-  const b = makeCtx({ disk, skills: [] });
-  await mod.apply(b.ctx);
-  const it = b.state.saved.items[0] ?? {};
-  // 磁盘存档不会在「技能读不到」时被重写，所以这里可能还是脏值——每次读都会归一，不是问题。
-  // 生效的是内存态，见第 5 组。
-  check("技能声明不在：记录里不出现 safe 权限", !JSON.stringify(it).includes('"safe"'), JSON.stringify(it));
-  check("技能声明不在：工具仍注册", b.state.registered.includes("skill_one"), b.state.registered.join(","));
-}
+async function runCopy(mutation) {
+  // Parent apply scans its own subdirectory at startup. Stage only the two entry points.
+  const dir = mkdtempSync(join(resolve(tmpdir()), "shells-boot-"));
+  const sub = join(dir, "sub");
+  const shellDir = join(sub, "shells");
+  try {
+    mkdirSync(shellDir, { recursive: true });
+    for (const file of entryFiles) {
+      let source = readFileSync(join(repo, file));
+      if (file === mutation?.file) {
+        source = source.toString("utf8");
+        if (source.split(mutation.before).length !== 2) {
+          throw new Error("Expected exactly one mutation site for " + mutation.name);
+        }
+        source = source.replace(mutation.before, mutation.after);
+      }
+      writeFileSync(join(dir, file), source);
+    }
 
-// 4. 同名工具取严：抽父插件里真实的 stricterDanger 跑，不复制实现。
-{
-  const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-  const dline = src.match(/^const dangers\b[^\n]*$/m);
-  const fn = src.match(/const stricterDanger = \(a: unknown, b: unknown\)[\s\S]*?\n\};/);
-  if (!dline || !fn) {
-    check("抽得到 dangers / stricterDanger", false, dline ? "缺函数" : "缺常量");
-  } else {
-    const js = (dline[0] + "\n" + fn[0])
-      .replace(/\s+as const/g, "")
-      .replace(/\(a: unknown, b: unknown\): string \| undefined/, "(a, b)")
-      .replace(/a as Danger/g, "a")
-      .replace(/b as Danger/g, "b");
-    const stricterDanger = new Function(js + "\nreturn stricterDanger;")();
-    const cases = [
-      ["ask + 缺字段", "ask", undefined, "ask"],
-      ["缺字段 + ask", undefined, "ask", "ask"],
-      ["safe + 缺字段", "safe", undefined, "ask"],
-      ["缺字段 + safe", undefined, "safe", "ask"],
-      ["bogus + full", "bogus", "full", "full"],
-      ["full + bogus", "full", "bogus", "full"],
-      ["safe + safe", "safe", "safe", "safe"],
-      ["ask + full", "ask", "full", "full"],
-    ];
-    for (const [label, a, b2, want] of cases) {
-      const got = stricterDanger(a, b2);
-      check(`取严：${label} => ${want}`, got === want, String(got));
+    const parent = await import(pathToFileURL(join(dir, parentFile)).href);
+    const shells = await import(pathToFileURL(join(dir, shellFile)).href);
+    return await runSuite(parent, shells);
+  } finally {
+    for (const path of entryFiles.map(file => join(dir, file))) {
+      if (existsSync(path)) unlinkSync(path);
+    }
+    for (const path of [shellDir, sub, dir]) {
+      if (existsSync(path)) rmdirSync(path);
     }
   }
 }
 
-// 5. 内存态（不是磁盘）：技能声明不在时，注册出来的工具等级不能是 safe。
-{
-  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "bogus", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
-  const b = makeCtx({ disk, skills: [] });
-  await mod.apply(b.ctx);
-  const tool = b.state.lastTool;
-  check("内存态：注册工具等级是 ask", tool && tool.danger === "ask", String(tool && tool.danger));
+const baseline = await runCopy();
+if (baseline.length > 0) {
+  process.exitCode = 1;
+} else if (process.argv.includes("--mutate")) {
+  for (const mutation of mutations) {
+    console.log("\nMutation: " + mutation.name);
+    const failed = await runCopy(mutation);
+    if (mutation.expected.every(label => failed.includes(label))) {
+      console.log("Mutation detected");
+    } else {
+      console.error("Mutation missed a target assertion: " + mutation.expected.filter(label => !failed.includes(label)).join(", "));
+      process.exitCode = 1;
+    }
+  }
 }
-
-// 6. 存盘写着 safe、技能读不到、工具也不在目录里。
-// 这是 dangerFor 里 «!tool && base === "safe" → ask» 那一条真正起作用的位置：
-// 旧写法直接拿存盘的 safe 当结论，等于「不知道多危险」被当成「肯定没危险」。
-{
-  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "safe", requiredPermission: "safe", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
-  const b = makeCtx({ disk, skills: [] });
-  await mod.apply(b.ctx);
-  const tool = b.state.lastTool;
-  // 注册等级这里确实还是存盘值——技能读不到时没东西可核，不假造一个。
-  // 真正要守的是「不许跑」：拿不到当前声明就停。
-  const out = await tool.run({}, { permission: "full" });
-  check("技能与工具都读不到：运行时直接停", out?.status === "blocked", String(out?.status));
-}
-
-// 7. 对照组：存盘 safe、技能也声明 safe，就不该被抬——免得上面那条变成「一律 ask」。
-{
-  const skills = [{ id: "skill_one", name: "一号", kind: "single", danger: "safe", revision: 1, stepCount: 1, params: [] }];
-  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "safe", requiredPermission: "safe", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
-  const b = makeCtx({ disk, skills });
-  await mod.apply(b.ctx);
-  const tool = b.state.lastTool;
-  check("声明确实是 safe：注册等级保持 safe", tool && tool.danger === "safe", String(tool && tool.danger));
-}
-
-const failed = results.filter((r) => !r.ok).length;
-console.log(`\n${results.length - failed}/${results.length} 通过`);
-if (failed) process.exit(1);
