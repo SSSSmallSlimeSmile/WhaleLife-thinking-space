@@ -21,7 +21,14 @@
 每个壳对应一条技能。工具被调用时：
 
 1. 用调用者的权限（`session.permission`）去调 `space_run`，不写死
-2. 危险等级只决定「要不要问」。放行条件是**用户对这一次执行明确确认过**：壳去问宿主审批接口（`ctx.approval.request()`），拿到 `approved` 才把 `confirmSideEffects` 传 `true`。拿不到确认就不跑，回 `needs_confirmation` 并附上宿主给的原因，指路到能确认的入口——壳不替用户点头，也不把「配置里给了 full 权限」当成「这次同意」
+2. 危险等级只决定「要不要问」。放行条件记在壳自己这条记录的 `approval` 上，两档：
+
+   - `ask`（默认）——**每次执行都要当次的明确同意**。壳去问宿主审批接口（`ctx.approval.request()`），拿到 `approved` 才把 `confirmSideEffects` 传 `true`。宿主现在没有审批流，所以它停在 `needs_confirmation`，一次也不调 `space_run`。
+   - `full`——**事先的持续授权**。用户在壳页面上把这一条改成 full，等于说「这个壳以后含副作用的步骤直接跑，不用再问」。之后每次调用都按 full 权限执行，不再经过审批接口。
+
+   `full` 不是「这一次同意」，也不看调用者所在会话是什么权限；它是针对这个壳的长期决定，随时可以在页面上改回 ask。
+
+   还有一道事后的闸：每次执行前重新读一次技能的权限声明，和记录里的 `requiredPermission` 比对，变了就 `blocked`，请人删旧壳重新发布。这道拦的是「声明被换掉」，拦不住「声明没变但内容被改得更危险」——那要你自己信得过这条技能。
 3. 把 `space_run` 的回执原样转述，包括 `staleDefinition`（技能在运行期间被改过）
 
 危险等级**从技能自己声明的步骤推导**，页面加壳时直接读 `space_skills` 返回的 `danger`，壳不能自己填。
@@ -52,6 +59,8 @@
       "toolName": "skill_test_comfy_two_step",
       "label": "测试·出图两段",
       "danger": "safe",
+      "requiredPermission": "safe",
+      "approval": "ask",
       "skillRevision": 2,
       "enabled": true,
       "addedAt": "2026-11-23T14:35:46.867Z"
@@ -62,9 +71,13 @@
 
 工具名按技能 id 生成（非字母数字转下划线，长度 60），撞了自动加 `_2`。
 
+- `requiredPermission`：加壳时从技能声明抄下来的原始权限要求，执行前拿它跟当前技能再比一次。
+- `approval`：`ask` / `full`，默认 `ask`。写 `full` 就是这一条壳的持续授权，见上面「它做什么」第 2 条。
+- 老记录缺 `requiredPermission` 时，启动会按技能当前声明补一次；技能已经读不到就补不上，那条壳一调就 `blocked`。
+
 ## 页面
 
-`/plugins/thinking-space/shells/`（设置页），列出当前壳、从技能列表里挑一条加壳、删除壳。加壳时如果技能不存在或已有壳会直接说原因。
+`/plugins/thinking-space/shells/`（设置页），列出当前壳、从技能列表里挑一条加壳、删除壳，每条壳有一列「免问」可以选 `ask` / `full`。加壳时如果技能不存在或已有壳会直接说原因；技能没有权限声明时直接拒，不默认成 `safe`。
 
 ## 不读别的插件的文件
 
