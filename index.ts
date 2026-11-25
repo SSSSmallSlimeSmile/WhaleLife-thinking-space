@@ -142,12 +142,17 @@ function matchesLiteralType(value: unknown, type: unknown): boolean {
 function dangerFor(steps: Step[], catalog: Map<string, ToolContract>, fallback: Danger): Danger {
   let highest = 0;
   let unknown = false;
+  // 存盘的旧值本身也可能坏（手改过、旧版本写歪）。坏值不能当 safe 用，至少按 ask。
+  const base: Danger = dangers.includes(fallback) ? fallback : "ask";
   for (const step of steps) {
     const tool = catalog.get(step.tool);
     const declared = tool && dangers.includes(tool.danger as Danger) ? tool.danger as Danger : undefined;
     if (tool && declared === undefined) unknown = true;
-    const hazard = declared ?? (!tool && fallback === "safe" ? "ask" : fallback);
+    const hazard = declared ?? (!tool && base === "safe" ? "ask" : base);
     highest = Math.max(highest, Math.max(0, dangers.indexOf(hazard)));
+    // 写文件、跑命令、发消息、发声这几个：不管工具自己声明什么，都至少按 ask 算。
+    // 预检早就这么判了，这里对齐，免得页面不显示确认框、预检又拦下来。
+    if (sideEffectTools.has(step.tool)) highest = Math.max(highest, 1);
   }
   if (unknown && highest < 1) return "ask";
   return dangers[highest];
@@ -1906,22 +1911,20 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
       const missing = missingParams(skill, rawGiven);
       if (missing.length) return blocked(runId, skill.id, "缺少必填参数：" + missing.join("、"));
 
-      // 预检：所有步骤的工具必须存在、归属一致、危险等级不高于声明
+      // 预检：所有步骤的工具必须存在、归属一致
       const catalog = await catalogByName();
       const unavailable: string[] = [];
-      let sideEffects = false;
       for (const step of skill.steps) {
         const tool = catalog.get(step.tool);
         if (!tool || (tool.plugin && tool.plugin !== step.plugin)) unavailable.push(step.id + " " + step.tool);
-        else {
-          // 降级（旧宿主没有 catalog）时工具没有 danger，回落到技能自己声明的 danger
-          const danger = tool.danger || skill.danger || "ask";
-          if (sideEffectTools.has(step.tool) || danger !== "safe") sideEffects = true;
-        }
       }
+      // 危险等级统一走 dangerFor：跟界面、加壳、复算同一个口径。
+      // 不再「工具没有 danger 就回落存盘的 skill.danger」——那条路会把未知降成 safe。
+      const resolvedDanger = dangerFor(skill.steps, catalog, skill.danger);
+      const sideEffects = resolvedDanger !== "safe" || skill.steps.some(step => sideEffectTools.has(step.tool));
       if (unavailable.length) return blocked(runId, skill.id, "工具不可用：" + unavailable.join("、"),
         skill.steps.map(step => ({ id: step.id, tool: step.tool, plugin: step.plugin, status: "blocked" as RunStatus, elapsedMs: 0, input: null, output: null })));
-      if (sideEffects && !args?.confirmSideEffects)
+      if (sideEffects && args?.confirmSideEffects !== true)
         return blocked(runId, skill.id, "这条技能含副作用步骤（写入、执行、发送或发声），需要 confirmSideEffects:true 才会跑。",
           skill.steps.map(step => ({ id: step.id, tool: step.tool, plugin: step.plugin, status: "blocked" as RunStatus, elapsedMs: 0, input: null, output: null })));
 

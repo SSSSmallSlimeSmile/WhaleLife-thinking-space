@@ -44,8 +44,6 @@ interface Shell {
   label: string;
   /** 从技能推导出来的危险等级，不让壳自己填。 */
   danger: Danger;
-  /** 用户对这个壳的放行配置：ask 要问，full 免问。缺省 ask。 */
-  approval?: "ask" | "full";
   /** 发布时技能接口返回的原始危险声明。旧记录可能没有。 */
   requiredPermission?: Danger;
   /** 加壳那一刻技能的版本，只在页面上比对，不参与运行。 */
@@ -166,8 +164,6 @@ select,input[type=text]{width:100%;max-width:460px;padding:8px 11px;border:1px s
 .notice.ok{border-color:#4a8}
 .notice.bad{border-color:#c88}
 code{font-family:ui-monospace,Consolas,monospace;font-size:13px}
-select.approval{width:auto;max-width:none;padding:4px 8px;font-size:13px}
-.approval-form{display:flex;gap:6px;align-items:center;margin:0}
 button.mini{padding:3px 9px;font-size:12px;font-weight:500}
 </style></head><body><h1>${escape(title)}</h1>${body}</body></html>`;
 }
@@ -179,18 +175,21 @@ export async function apply(ctx: Context) {
   const disposers = new Map<string, () => void>();
   /** 最近一次操作的结果，只给页面看。 */
   let lastNote = "";
+  /** 磁盘上还留着 approval 字段（0.5.4 之前的记录），启动时要重写一次存档。 */
+  let strippedLegacyApproval = false;
 
   async function readStore(): Promise<Store> {
     try {
       const raw = await ctx.config.read<Store>(storeFile);
       if (!raw || !Array.isArray(raw.items)) return { ...EMPTY, items: [] };
+      // 旧版本写过 approval（ask / full）。读取时不再认这个字段，顺带记一笔，启动时重写存档把它清掉。
+      if (raw.items.some(entry => entry && (entry as any).approval !== undefined)) strippedLegacyApproval = true;
       const items = raw.items.filter(item => item && typeof item.skillId === "string" && typeof item.toolName === "string")
         .map(item => ({
           skillId: item.skillId,
           toolName: item.toolName,
           label: typeof item.label === "string" && item.label.trim() ? item.label : item.skillId,
           danger: (item.danger === "full" || item.danger === "safe" ? item.danger : "ask") as Danger,
-          approval: (item.approval === "full" ? "full" : "ask") as "ask" | "full",
           requiredPermission: declaredDanger(item.requiredPermission),
           skillRevision: Number.isInteger(item.skillRevision) ? item.skillRevision : 0,
           enabled: item.enabled !== false,
@@ -232,7 +231,10 @@ export async function apply(ctx: Context) {
     } catch { /* 服务不在就退回工具，下面接着试 */ }
     try {
       const raw: any = await ctx.tools.call("space_skills", {}, { permission: "ask" } as any);
-      const body = raw && raw.ok === true ? raw.result : null;
+      if (!raw || raw.ok !== true) {
+        throw new Error(typeof raw?.result === "string" ? raw.result : "space_skills 没有给回执");
+      }
+      const body: any = raw.result;
       const items = (Array.isArray(body?.skills) ? body.skills : []).map((item: any) => ({
         id: String(item?.id ?? ""),
         name: String(item?.name ?? ""),
@@ -272,17 +274,7 @@ export async function apply(ctx: Context) {
             return { status: "blocked", skill: shell.skillId, note: "壳记录里没有技能的权限声明，请删除旧壳后重新发布。" };
           }
           const hasSideEffects = shell.requiredPermission !== "safe";
-          const askMode: "ask" | "full" = shell.approval === "full" ? "full" : "ask";
-          const granted = !hasSideEffects || askMode === "full";
-          if (!granted) {
-            return {
-              status: "needs_confirmation",
-              skill: shell.skillId,
-              note: "这个壳设的是 ask：含副作用步骤，要先拿到明确同意。宿主现在没有审批流，没人点得了确认——真要免问，去壳页面把它改成 full。",
-              took: Date.now() - started,
-            };
-          }
-          const effectivePermission = hasSideEffects && askMode === "full" ? "full" : session?.permission;
+          // 先核对技能定义没被换过，再谈要不要停。顺序反了会出现「声明已经变了，却只回一句待确认」。
           const current = await fetchSkills();
           const skill = current.items.find(item => item.id === shell.skillId);
           if (!current.ok || skill?.requiredPermission === undefined) {
@@ -291,6 +283,15 @@ export async function apply(ctx: Context) {
           if (shell.requiredPermission !== skill.requiredPermission) {
             return { status: "blocked", skill: shell.skillId, note: "技能的权限声明已变更，请删除旧壳后重新发布。" };
           }
+          if (hasSideEffects) {
+            return {
+              status: "needs_confirmation",
+              skill: shell.skillId,
+              note: "这个壳含副作用步骤（写文件、跑命令、发消息、发图）。宿主没有审批流，壳不替用户点头——要在这次执行，请先去思维空间技能页勾选本次执行，再调一次。",
+              took: Date.now() - started,
+            };
+          }
+          const effectivePermission = session?.permission;
           const params = pickParams(args, skill.params);
           const raw: any = await ctx.tools.call("space_run", {
             id: shell.skillId,
@@ -298,7 +299,7 @@ export async function apply(ctx: Context) {
             confirmSideEffects: hasSideEffects,
             via: "self",
           }, {
-            // 壳设成 full 时，这里按用户对该壳的配置提权；ask 时原样透传调用者权限。
+            // 只读技能才走到这里：原样透传调用者权限，不提权。
             permission: effectivePermission,
             signal: session?.signal,
             origin: { plugin: "thinking-space/shells", action: shell.skillId },
@@ -367,7 +368,7 @@ export async function apply(ctx: Context) {
   const boot = await refreshSkills();
   if (!boot.ok) lastNote = "读不到技能声明，壳先按无参数注册：" + (boot.error ?? "未知原因");
   // 旧记录可能没有权限声明（0.5.1 之前加的壳）。技能还在就照着技能补上；补不上就留空，运行时照旧拦。
-  let patched = false;
+  let patched = strippedLegacyApproval;
   for (const item of store.items) {
     const skill = skillIndex.get(item.skillId);
     if (item.requiredPermission === undefined && skill?.requiredPermission) {
@@ -375,9 +376,15 @@ export async function apply(ctx: Context) {
       item.danger = skill.requiredPermission;
       patched = true;
     }
+    // 0.5.4 起没有「长期免问」这一档。磁盘上残留的 approval 在 readStore 里记下，启动时整份重写一遍就没了。
   }
   if (patched) {
-    try { await saveStore(); } catch { /* 写不进去就算了，运行时还有一道拦 */ }
+    try {
+      await saveStore();
+    } catch (error) {
+      // 备份写不进去不影响运行（内存里已经没有 approval 了），但磁盘上会留着旧字段，页面上说一声。
+      lastNote = "旧记录清理没写进磁盘：" + (error instanceof Error ? error.message : String(error)) + "。运行仍按逐次确认。";
+    }
   }
   syncRegistrations();
 
@@ -395,7 +402,6 @@ export async function apply(ctx: Context) {
   <td><code>${escape(item.skillId)}</code><div class="muted">${escape(item.label)}</div></td>
   <td><code>${escape(item.toolName)}</code></td>
   <td><span class="badge${item.danger === "safe" ? "" : " warn"}">${escape(item.danger)}</span></td>
-  <td><form method="post" action="${apiBase}approval" class="approval-form"><input type="hidden" name="skillId" value="${escape(item.skillId)}"><select name="approval" class="approval"><option value="ask"${item.approval === "full" ? "" : " selected"}>ask</option><option value="full"${item.approval === "full" ? " selected" : ""}>full</option></select><button class="mini" type="submit">存</button></form></td>
   <td>${item.enabled ? '<span class="badge ok">已注册</span>' : '<span class="badge warn">已关</span>'}
     ${missing ? '<span class="badge warn">技能已不在</span>' : ""}
     ${drift ? `<span class="badge warn">rev ${item.skillRevision}→${nowRev}</span>` : ""}</td>
@@ -415,18 +421,17 @@ export async function apply(ctx: Context) {
 ${notice}
 <section class="panel">
   <h2>现在的壳（${store.items.length}）</h2>
-  ${store.items.length ? `<table><thead><tr><th>技能</th><th>工具名</th><th>危险</th><th>免问</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+  ${store.items.length ? `<table><thead><tr><th>技能</th><th>工具名</th><th>危险</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
     : '<p class="muted" style="margin:0">还没有。下面挑一条技能加壳。</p>'}
-  <p class="muted" style="margin:14px 0 0">只读的壳（危险 <code>safe</code>）两档都一样：直接跑，永远不放行副作用。</p>
+  <p class="muted" style="margin:14px 0 0">只有只读的壳（危险 <code>safe</code>）直接跑；含副作用的一律停在待确认，等你在技能页勾选本次执行。</p>
 </section>
 <section class="panel" style="border-color:rgba(200,140,60,.55)">
-  <h2>「免问」改成 full 之后会怎样</h2>
+  <h2>含副作用的壳为什么每次都停</h2>
   <ul class="cost">
-    <li><b>ask（默认）</b> —— 含副作用（写文件、跑命令、发消息、发图）时，每一次都要当次的明确同意才执行。宿主现在没有审批流，所以它停在 <code>needs_confirmation</code>，一次也不会调 <code>space_run</code>：<b>这个壳等于暂时用不了。</b></li>
-    <li><b>full（事先的持续授权）</b> —— 选它等于说「这个壳以后不用再问」。之后每次调用含副作用的步骤都直接执行，按 full 权限跑，不再经过审批接口。<b>没有任何人再拦一次。</b>它不是「这一次同意」，也不看调用者所在会话的权限。</li>
-    <li><b>后果不对称。</b>改成 full 是把这个壳交出去：它跑什么、发到哪儿、写哪些文件，都按技能当时的定义走。<b>技能以后被改得更危险，也照样直接跑</b>——壳只在技能的权限声明本身变了的时候才拦一下，那已经是事后。</li>
-    <li><b>所以只给自己完全信得过的技能开 full</b>，最好这条技能只有你能改。别人的、来路不明的、带命令执行或对外发送的，留在 ask。</li>
-    <li><b>随时能改回来</b>：在这页把下拉改回 ask、点「存」，下一次调用就停住。</li>
+    <li><b>壳不替用户点头。</b>写文件、跑命令、发消息、发图这几种，每一次执行都要当次的明确同意。</li>
+    <li><b>宿主没有审批流，所以壳停在 <code>needs_confirmation</code></b>，一个 <code>space_run</code> 都不调。要在这一次执行，去思维空间技能页勾选本次执行，再调一次。</li>
+    <li><b>没有「长期免问」这一档。</b>用户授予一次，不等于授予以后每一次；壳也没资格替用户做这个决定。</li>
+    <li><b>只读技能照常。</b>危险 <code>safe</code> 的壳直接跑，不看调用者权限。</li>
   </ul>
 </section>
 <section class="panel" style="border-color:rgba(200,140,60,.55)">
@@ -460,10 +465,14 @@ ${notice}
 
   ctx.web.page(pagePath, async (req: any, res: any) => {
     try {
-      const note = String(new URL(req.url ?? "/", "http://local").searchParams.get("note") ?? "");
-      const tone = String(new URL(req.url ?? "/", "http://local").searchParams.get("tone") ?? "") as "ok" | "bad" | "";
+      const url = new URL(req.url ?? "/", "http://local");
+      const urlNote = String(url.searchParams.get("note") ?? "");
+      const urlTone = String(url.searchParams.get("tone") ?? "");
+      // URL 里没带提示时，把启动时留下的那句顶上来（比如旧记录清理没写进磁盘）。
+      const note = urlNote || lastNote;
+      const tone = (urlNote ? (urlTone === "ok" || urlTone === "bad" ? urlTone : "") : lastNote ? "bad" : "") as "ok" | "bad" | "";
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(await renderPanel(note, tone === "ok" || tone === "bad" ? tone : ""));
+      res.end(await renderPanel(note, tone));
     } catch (error) {
       res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html("技能壳", `<p>暂时读不到状态：${escape(error instanceof Error ? error.message : "")}</p>`));
@@ -501,7 +510,6 @@ ${notice}
         toolName: uniqueName(toToolName(skillId), taken),
         label: String(skill.name ?? skillId).slice(0, 40),
         danger: skill.requiredPermission,
-        approval: "ask",
         requiredPermission: skill.requiredPermission,
         skillRevision: Number(skill.revision ?? 0),
         enabled: true,
@@ -515,24 +523,6 @@ ${notice}
       return redirect(res, `已加壳：工具 ${shell.toolName} 现在就出现在工具表里了（带 ${count} 个参数）。`, "ok");
     } catch (error) {
       return redirect(res, "没加成：" + (error instanceof Error ? error.message : String(error)), "bad");
-    }
-  });
-
-  ctx.web.api(apiBase + "approval", async (req: any, res: any) => {
-    try {
-      const form = await readForm(req);
-      const skillId = String(form.get("skillId") ?? "").trim();
-      const approval = String(form.get("approval") ?? "").trim();
-      if (approval !== "ask" && approval !== "full") return redirect(res, "免问只能选 ask 或 full。", "bad");
-      const shell = store.items.find(item => item.skillId === skillId);
-      if (!shell) return redirect(res, "没有这条记录。", "bad");
-      shell.approval = approval;
-      await saveStore();
-      return redirect(res, approval === "full"
-        ? "已改成 full：这个壳以后不再问，含副作用的步骤直接跑。"
-        : "已改成 ask：含副作用时先停下要同意。", "ok");
-    } catch (error) {
-      return redirect(res, "没存成：" + (error instanceof Error ? error.message : String(error)), "bad");
     }
   });
 
