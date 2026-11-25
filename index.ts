@@ -146,7 +146,7 @@ function dangerFor(steps: Step[], catalog: Map<string, ToolContract>, fallback: 
     const tool = catalog.get(step.tool);
     const declared = tool && dangers.includes(tool.danger as Danger) ? tool.danger as Danger : undefined;
     if (tool && declared === undefined) unknown = true;
-    const hazard = declared ?? fallback;
+    const hazard = declared ?? (!tool && fallback === "safe" ? "ask" : fallback);
     highest = Math.max(highest, Math.max(0, dangers.indexOf(hazard)));
   }
   if (unknown && highest < 1) return "ask";
