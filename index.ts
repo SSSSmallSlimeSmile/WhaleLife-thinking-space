@@ -229,7 +229,15 @@ type TrimNote = { from: number; to: number; dropped: { id: string; tool: string;
 type RelevanceNote = { status: "matched" | "weak" | "unrelated" | "unassessed"; hits: number; terms: number; ratio: number; basis: string };
 type RunResult = { status: RunStatus; runId: string; skill: string; steps: StepResult[]; error?: string; trimmed?: TrimNote; trimSuggestion?: TrimNote; relevance?: RelevanceNote };
 
-const sideEffectTools = new Set(["hands_write", "hands_run", "qq_send_image", "qq_send_meme", "mouth_say", "speak"]);
+// 已知会动外部世界的工具：写盘、跑命令、发消息、发图、发声、出图。
+// 名单不完备时仍要靠工具自己声明的 danger；这里只把「名字我们认得出」的那些兜住。
+const sideEffectTools = new Set([
+  "hands_write", "hands_run",
+  "qq_send_image", "qq_send_meme", "qq_send_message", "bilibili_share_qq",
+  "mouth_say", "speak",
+  "comfy_generate",
+  "space_skill_save",
+]);
 
 function pick(value: unknown, path: string[]): unknown {
   let current: unknown = value;
@@ -1017,10 +1025,26 @@ const toolsSafe = async (): Promise<any[]> => {
   return [];
 };
 
-const catalogByName = async () => new Map([
-  ...(await toolsSafe()).map(tool => [tool.name, tool] as const),
-  [LLM_TOOL, llmContract] as const,
-]);
+/** 两档取严：认不出的那侧不算数，都认不出就给 undefined（交给 dangerFor 按未知处理）。 */
+const stricterDanger = (a: unknown, b: unknown): string | undefined => {
+  const ia = dangers.indexOf(a as Danger);
+  const ib = dangers.indexOf(b as Danger);
+  if (ia < 0) return ib < 0 ? undefined : dangers[ib];
+  if (ib < 0) return dangers[ia];
+  return dangers[Math.max(ia, ib)];
+};
+
+const catalogByName = async () => {
+  const map = new Map<string, ToolContract>();
+  for (const tool of await toolsSafe()) {
+    // 目录里出现同名条目时取更严的那档。之前是 Map 后值覆盖，
+    // 一条误标 safe 的同名条目能把前面那条 ask 顶掉，预检跟着放行。
+    const prev = map.get(tool.name);
+    map.set(tool.name, prev ? { ...tool, danger: stricterDanger(prev.danger, tool.danger) } : tool);
+  }
+  map.set(LLM_TOOL, llmContract);
+  return map;
+};
   async function readStore(): Promise<Store> {
     const data = await ctx.config.read<Store>(storeFile);
     if (record(data) && !Object.keys(data).length) return { schemaVersion: 1, skills: [] };
@@ -1904,6 +1928,10 @@ function hintsFor(items: { id: string; name: string }[], stats: Record<string, S
         skill = found;
       } catch (error) {
         return blocked(runId, args?.id ?? "", error instanceof Error ? error.message : "技能库读不到。");
+      }
+      // 坏记录（steps 空、不是数组）不能当「零步骤、跑完 ok」：那看着像成功，其实什么也没做。
+      if (!Array.isArray(skill.steps) || !skill.steps.length) {
+        return blocked(runId, skill.id, "这条技能没有步骤，不能运行。旧记录可能已经坏了，删掉重存一次。");
       }
       const rawGiven = args?.params && record(args.params) ? args.params : {};
       const startRevision = Number(skill.revision ?? 0);

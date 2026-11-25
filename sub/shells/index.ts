@@ -205,6 +205,14 @@ export async function apply(ctx: Context) {
     await ctx.config.save(storeFile, store);
   }
 
+  /** 所有「读—改—写」串起来跑。整份快照写盘，两个请求交错就会互相覆盖。 */
+  let mutationQueue: Promise<unknown> = Promise.resolve();
+  function serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = mutationQueue.then(fn, fn);
+    mutationQueue = run.catch(() => undefined);
+    return run;
+  }
+
   /** 已加载的技能声明，按 id 存。加壳时 refresh，注册时从这里取参数。 */
   let skillIndex = new Map<string, SkillInfo>();
 
@@ -329,10 +337,14 @@ export async function apply(ctx: Context) {
   function syncRegistrations() {
     const wanted = new Map(store.items.filter(item => item.enabled).map(item => [item.skillId, item]));
     // 注销不再需要的
-    for (const [skillId, dispose] of disposers) {
-      if (!wanted.has(skillId)) {
-        try { dispose(); } catch { /* 注销失败不影响后面 */ }
+    for (const [skillId, dispose] of [...disposers]) {
+      if (wanted.has(skillId)) continue;
+      try {
+        dispose();
         disposers.delete(skillId);
+      } catch (error) {
+        // 注销抛错时别把句柄扔了：扔了工具表里会留一个已经删掉的壳，下次也没人再试。
+        lastNote = `工具 ${skillId} 注销失败：${error instanceof Error ? error.message : String(error)}`;
       }
     }
     // 注册新的 / 名字变了的
@@ -351,16 +363,31 @@ export async function apply(ctx: Context) {
 
   /** 删掉一条记录并注销工具。只动自己的数据。 */
   async function removeShell(skillId: string) {
-    const idx = store.items.findIndex(item => item.skillId === skillId);
-    if (idx < 0) return false;
-    const dispose = disposers.get(skillId);
-    if (dispose) {
-      try { dispose(); } catch { /* 已经没了就算了 */ }
-      disposers.delete(skillId);
-    }
-    store.items.splice(idx, 1);
-    await saveStore();
-    return true;
+    return serialize(async () => {
+      const idx = store.items.findIndex(item => item.skillId === skillId);
+      if (idx < 0) return false;
+      const removed = store.items[idx];
+      const dispose = disposers.get(skillId);
+      let disposed = false;
+      if (dispose) {
+        try { dispose(); disposed = true; } catch { /* 注销失败先留着，写盘成功再处理 */ }
+      }
+      store.items.splice(idx, 1);
+      try {
+        await saveStore();
+      } catch (error) {
+        // 写盘没成：内存和工具表都退回去，不能让页面显示删了、重载又冒出来。
+        store.items.splice(idx, 0, removed);
+        if (disposed) {
+          try { disposers.set(skillId, registerShell(removed)); } catch { /* 补不回来就只剩提示 */ }
+        } else if (dispose) {
+          disposers.set(skillId, dispose);
+        }
+        throw error;
+      }
+      if (disposed) disposers.delete(skillId);
+      return true;
+    });
   }
 
   // —— 启动：读记录、刷技能声明、注册 ——
@@ -495,32 +522,41 @@ ${notice}
       const form = await readForm(req);
       const skillId = String(form.get("skillId") ?? "").trim();
       if (!skillId) return redirect(res, "没选技能。", "bad");
-      if (store.items.some(item => item.skillId === skillId)) return redirect(res, "这条技能已经有壳了。", "bad");
+      // 查重和写入放进同一段串行区：两个请求都在技能查询完成前查过重，就会各存一份。
+      const outcome = await serialize(async () => {
+        if (store.items.some(item => item.skillId === skillId)) return { note: "这条技能已经有壳了。", tone: "bad" as const };
 
-      // 校验技能真的存在，并拿它的危险等级和参数声明。
-      const { ok, items, error } = await fetchSkills();
-      if (!ok) return redirect(res, "读不到技能列表：" + (error ?? "未知原因"), "bad");
-      const skill = items.find(item => String(item.id) === skillId);
-      if (!skill) return redirect(res, "技能库里没有 " + skillId + "。", "bad");
+        // 校验技能真的存在，并拿它的危险等级和参数声明。
+        const { ok, items, error } = await fetchSkills();
+        if (!ok) return { note: "读不到技能列表：" + (error ?? "未知原因"), tone: "bad" as const };
+        const skill = items.find(item => String(item.id) === skillId);
+        if (!skill) return { note: "技能库里没有 " + skillId + "。", tone: "bad" as const };
+        if (skill.requiredPermission === undefined) return { note: "技能没有有效的权限声明，无法加壳。", tone: "bad" as const };
 
-      if (skill.requiredPermission === undefined) return redirect(res, "技能没有有效的权限声明，无法加壳。", "bad");
-      const taken = new Set<string>(store.items.map(item => item.toolName));
-      const shell: Shell = {
-        skillId,
-        toolName: uniqueName(toToolName(skillId), taken),
-        label: String(skill.name ?? skillId).slice(0, 40),
-        danger: skill.requiredPermission,
-        requiredPermission: skill.requiredPermission,
-        skillRevision: Number(skill.revision ?? 0),
-        enabled: true,
-        addedAt: new Date().toISOString(),
-      };
-      skillIndex.set(skillId, skill);
-      store.items.push(shell);
-      await saveStore();
-      syncRegistrations();
-      const count = Array.isArray(skill.params) ? skill.params.length : 0;
-      return redirect(res, `已加壳：工具 ${shell.toolName} 现在就出现在工具表里了（带 ${count} 个参数）。`, "ok");
+        const taken = new Set<string>(store.items.map(item => item.toolName));
+        const shell: Shell = {
+          skillId,
+          toolName: uniqueName(toToolName(skillId), taken),
+          label: String(skill.name ?? skillId).slice(0, 40),
+          danger: skill.requiredPermission,
+          requiredPermission: skill.requiredPermission,
+          skillRevision: Number(skill.revision ?? 0),
+          enabled: true,
+          addedAt: new Date().toISOString(),
+        };
+        skillIndex.set(skillId, skill);
+        store.items.push(shell);
+        try {
+          await saveStore();
+        } catch (error) {
+          store.items.pop();
+          throw error;
+        }
+        syncRegistrations();
+        const count = Array.isArray(skill.params) ? skill.params.length : 0;
+        return { note: `已加壳：工具 ${shell.toolName} 现在就出现在工具表里了（带 ${count} 个参数）。`, tone: "ok" as const };
+      });
+      return redirect(res, outcome.note, outcome.tone);
     } catch (error) {
       return redirect(res, "没加成：" + (error instanceof Error ? error.message : String(error)), "bad");
     }
