@@ -1025,13 +1025,15 @@ const toolsSafe = async (): Promise<any[]> => {
   return [];
 };
 
-/** 两档取严：认不出的那侧不算数，都认不出就给 undefined（交给 dangerFor 按未知处理）。 */
+/** 两档取严。任一侧认不出（不是 safe/ask/full）时按「未知」处理，至少 ask——
+ *  原来 bogus 与 safe 合并会得到 safe，等于让一个坏值把另一侧的正常等级抹掉。 */
 const stricterDanger = (a: unknown, b: unknown): string | undefined => {
   const ia = dangers.indexOf(a as Danger);
   const ib = dangers.indexOf(b as Danger);
-  if (ia < 0) return ib < 0 ? undefined : dangers[ib];
-  if (ib < 0) return dangers[ia];
-  return dangers[Math.max(ia, ib)];
+  const unknown = (a !== undefined && ia < 0) || (b !== undefined && ib < 0);
+  const known = [ia, ib].filter(i => i >= 0);
+  if (unknown) return dangers[Math.max(known.length ? Math.max(...known) : 0, 1)];
+  return known.length ? dangers[Math.max(...known)] : undefined;
 };
 
 const catalogByName = async () => {

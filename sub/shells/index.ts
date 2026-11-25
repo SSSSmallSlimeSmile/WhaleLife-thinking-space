@@ -386,7 +386,12 @@ export async function apply(ctx: Context) {
         // 写盘没成：内存和工具表都退回去，不能让页面显示删了、重载又冒出来。
         store.items.splice(idx, 0, removed);
         if (disposed) {
-          try { disposers.set(skillId, registerShell(removed)); } catch { /* 补不回来就只剩提示 */ }
+          try {
+            disposers.set(skillId, registerShell(removed));
+          } catch (again) {
+            // 记录还在、工具没了：两边不一致，得说出来，不能只报原来的写盘错误。
+            lastNote = `${removed.toolName} 注销后重新注册失败，工具暂时不在：${again instanceof Error ? again.message : String(again)}。删掉重加一次就行。`;
+          }
         } else if (dispose) {
           disposers.set(skillId, dispose);
         }
