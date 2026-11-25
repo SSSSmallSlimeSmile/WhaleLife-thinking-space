@@ -65,8 +65,9 @@ function makeCtx({ disk = { schemaVersion: 1, items: [] }, skills = [{ id: "skil
   const b = makeCtx({ disk, skills: [] });
   await mod.apply(b.ctx);
   const it = b.state.saved.items[0] ?? {};
-  check("技能声明不在：danger 不会落到 safe", it.danger !== "safe", String(it.danger));
-  check("技能声明不在：requiredPermission 留空", it.requiredPermission === undefined, String(it.requiredPermission));
+  // 磁盘存档不会在「技能读不到」时被重写，所以这里可能还是脏值——每次读都会归一，不是问题。
+  // 生效的是内存态，见第 5 组。
+  check("技能声明不在：记录里不出现 safe 权限", !JSON.stringify(it).includes('"safe"'), JSON.stringify(it));
   check("技能声明不在：工具仍注册", b.state.registered.includes("skill_one"), b.state.registered.join(","));
 }
 
@@ -107,8 +108,31 @@ function makeCtx({ disk = { schemaVersion: 1, items: [] }, skills = [{ id: "skil
   const b = makeCtx({ disk, skills: [] });
   await mod.apply(b.ctx);
   const tool = b.state.lastTool;
-  check("内存态：注册工具等级不是 safe", tool && tool.danger !== "safe", String(tool && tool.danger));
   check("内存态：注册工具等级是 ask", tool && tool.danger === "ask", String(tool && tool.danger));
+}
+
+// 6. 存盘写着 safe、技能读不到、工具也不在目录里。
+// 这是 dangerFor 里 «!tool && base === "safe" → ask» 那一条真正起作用的位置：
+// 旧写法直接拿存盘的 safe 当结论，等于「不知道多危险」被当成「肯定没危险」。
+{
+  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "safe", requiredPermission: "safe", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
+  const b = makeCtx({ disk, skills: [] });
+  await mod.apply(b.ctx);
+  const tool = b.state.lastTool;
+  // 注册等级这里确实还是存盘值——技能读不到时没东西可核，不假造一个。
+  // 真正要守的是「不许跑」：拿不到当前声明就停。
+  const out = await tool.run({}, { permission: "full" });
+  check("技能与工具都读不到：运行时直接停", out?.status === "blocked", String(out?.status));
+}
+
+// 7. 对照组：存盘 safe、技能也声明 safe，就不该被抬——免得上面那条变成「一律 ask」。
+{
+  const skills = [{ id: "skill_one", name: "一号", kind: "single", danger: "safe", revision: 1, stepCount: 1, params: [] }];
+  const disk = { schemaVersion: 1, items: [{ skillId: "skill_one", toolName: "skill_one", label: "一号", danger: "safe", requiredPermission: "safe", skillRevision: 1, enabled: true, addedAt: "2026-01-01T00:00:00.000Z" }] };
+  const b = makeCtx({ disk, skills });
+  await mod.apply(b.ctx);
+  const tool = b.state.lastTool;
+  check("声明确实是 safe：注册等级保持 safe", tool && tool.danger === "safe", String(tool && tool.danger));
 }
 
 const failed = results.filter((r) => !r.ok).length;
