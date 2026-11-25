@@ -141,11 +141,15 @@ function matchesLiteralType(value: unknown, type: unknown): boolean {
 }
 function dangerFor(steps: Step[], catalog: Map<string, ToolContract>, fallback: Danger): Danger {
   let highest = 0;
+  let unknown = false;
   for (const step of steps) {
     const tool = catalog.get(step.tool);
-    const hazard = tool?.plugin === step.plugin ? tool.danger : fallback;
-    highest = Math.max(highest, dangers.indexOf(hazard as Danger));
+    const declared = tool && dangers.includes(tool.danger as Danger) ? tool.danger as Danger : undefined;
+    if (tool && declared === undefined) unknown = true;
+    const hazard = declared ?? fallback;
+    highest = Math.max(highest, Math.max(0, dangers.indexOf(hazard)));
   }
+  if (unknown && highest < 1) return "ask";
   return dangers[highest];
 }
 function validateSkill(id: unknown, spec: unknown, catalog: Map<string, ToolContract>, maxSteps = 20): Skill {
